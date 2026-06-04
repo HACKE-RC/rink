@@ -22,11 +22,20 @@ R2 objects are **private by default**, so `rink` gives you two kinds of link:
 
 ## Install
 
+From PyPI:
+
+```sh
+uv tool install rink     # install as a CLI on your PATH (recommended)
+uv pip install rink      # or into the active environment
+pip install rink         # or with plain pip
+```
+
+From source (for development):
+
 ```sh
 uv sync                 # install deps into the project venv
 uv run rink --help      # run from the project
-# or install as a tool on your PATH:
-uv tool install .
+uv tool install .       # install this checkout as a tool on your PATH
 ```
 
 ## Configure
