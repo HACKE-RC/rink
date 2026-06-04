@@ -1,6 +1,6 @@
 [project]
 name = "rink"
-version = "0.2.0"
+version = "0.2.1"
 description = "Upload files/folders to Cloudflare R2 and get a shareable link"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,6 +21,7 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.7",
     "segno>=1.6",
+    "tomli>=2.0 ; python_version < '3.11'",
 ]
 
 [dependency-groups]

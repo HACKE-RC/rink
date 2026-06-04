@@ -9,9 +9,13 @@ from __future__ import annotations
 
 import os
 import re
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 # Max lifetime for a SigV4 presigned URL (7 days), used as a hard cap.
 MAX_EXPIRY = 604800
