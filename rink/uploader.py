@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import shutil
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 
 import boto3
@@ -17,14 +16,6 @@ from .links import guess_content_type
 # Files at/above this size are uploaded in 8 MiB multipart chunks.
 _MB = 1024 * 1024
 _TRANSFER = TransferConfig(multipart_threshold=8 * _MB, multipart_chunksize=8 * _MB)
-
-
-@dataclass
-class Uploaded:
-    """One uploaded object."""
-
-    key: str
-    size: int
 
 
 def make_client(cfg: Config):
@@ -63,7 +54,7 @@ def head_object(client, bucket: str, key: str) -> dict:
 
 def upload_file(
     client, bucket: str, src: Path, key: str, progress=None, extra: dict | None = None
-) -> Uploaded:
+) -> None:
     """Upload a single file, with automatic multipart for large files.
 
     `progress` is an optional callable receiving bytes-transferred per chunk.
@@ -80,7 +71,6 @@ def upload_file(
         Config=_TRANSFER,
         Callback=progress,
     )
-    return Uploaded(key=key, size=src.stat().st_size)
 
 
 def zip_folder(folder: Path) -> Path:

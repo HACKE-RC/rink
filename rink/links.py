@@ -10,7 +10,7 @@ from __future__ import annotations
 import mimetypes
 from urllib.parse import quote
 
-from .config import MAX_EXPIRY, Config
+from .config import Config
 
 
 def guess_content_type(key: str) -> str:
@@ -19,11 +19,11 @@ def guess_content_type(key: str) -> str:
 
 
 def presigned_url(client, bucket: str, key: str, expiry: int) -> str:
-    """Generate a presigned GET URL valid for `expiry` seconds."""
-    if expiry < 1:
-        raise ValueError("expiry must be at least 1 second")
-    if expiry > MAX_EXPIRY:
-        raise ValueError(f"expiry must be <= {MAX_EXPIRY} seconds (7 days)")
+    """Generate a presigned GET URL valid for `expiry` seconds.
+
+    Range validation lives in the CLI's `_resolve_expiry` (the single home), so it
+    can fail fast before any upload; this layer trusts its caller.
+    """
     return client.generate_presigned_url(
         "get_object",
         Params={"Bucket": bucket, "Key": key},

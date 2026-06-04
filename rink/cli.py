@@ -6,9 +6,12 @@ import json as jsonlib
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import typer
@@ -39,6 +42,17 @@ err = Console(stderr=True)
 def _fail(message: str) -> None:
     err.print(f"[bold red]error:[/] {message}")
     raise typer.Exit(code=1)
+
+
+@dataclass
+class LinkResult:
+    """One published object + its shareable link."""
+
+    key: str
+    size: int
+    url: str
+    link_type: str  # "presigned" | "public"
+    expires_at: int | None
 
 
 @app.command()
@@ -173,10 +187,9 @@ def _fmt_remaining(expires_at: int | None) -> str:
     """Human 'time left' for a presigned link, or a marker for other states."""
     if expires_at is None:
         return "[green]permanent[/]"
-    remaining = expires_at - int(time.time())
-    if remaining <= 0:
+    if _is_expired(expires_at):
         return "[red]expired[/]"
-    return _human_duration(remaining)
+    return _human_duration(expires_at - int(time.time()))
 
 
 def _human_duration(secs: int) -> str:
@@ -226,10 +239,8 @@ def ls(
         expires_at = row["expires_at"] if row else None
         link_type = row["link_type"] if row else None
 
-        if expired:
-            # Only presigned links can be "expired".
-            if expires_at is None or expires_at - int(time.time()) > 0:
-                continue
+        if expired and not _is_expired(expires_at):
+            continue  # --expired: skip anything still live (or permanent)
 
         if row is None:
             link_cell = "[dim]untracked[/]"
@@ -292,31 +303,20 @@ def link(
     json_out: bool = typer.Option(False, "--json", help="Print result as JSON."),
 ) -> None:
     """Regenerate a fresh link for an already-uploaded object (no re-upload)."""
-    cfg = _load()
-    if bucket:
-        cfg.bucket = bucket
+    cfg = _apply_bucket(_load(), bucket)
     quiet = quiet or json_out
+    _require_public_base(cfg, public)
     expiry = _resolve_expiry(cfg, expiry, public)
 
     client = uploader.make_client(cfg)
     try:
         head = uploader.head_object(client, cfg.bucket, key)
-    except Exception:  # noqa: BLE001
-        _fail(f"object not found in {cfg.bucket}: {key}")
+    except Exception as exc:  # noqa: BLE001
+        _fail(_not_found_message(exc, cfg.bucket, key))
     size = int(head.get("ContentLength", 0))
 
-    url = _make_link(client, cfg, key, public, expiry)
-    _record(cfg, key, size, public, expiry, url)
-    results = [
-        {
-            "key": key,
-            "size": size,
-            "url": url,
-            "link_type": "public" if public else "presigned",
-            "expires_at": None if public else int(time.time()) + expiry,
-        }
-    ]
-    _render_results(results, public, expiry, quiet, json_out, copy, qr)
+    result = _publish(client, cfg, key, size, public, expiry)
+    _render_results([result], public, expiry, quiet, json_out, copy, qr)
 
 
 @app.command(name="open")
@@ -327,16 +327,15 @@ def open_cmd(
     bucket: str = typer.Option(None, "--bucket", help="Override the configured bucket."),
 ) -> None:
     """Open an object's link in your default browser."""
-    cfg = _load()
-    if bucket:
-        cfg.bucket = bucket
+    cfg = _apply_bucket(_load(), bucket)
+    _require_public_base(cfg, public)
     expiry = _resolve_expiry(cfg, expiry, public)
 
     client = uploader.make_client(cfg)
     try:
         uploader.head_object(client, cfg.bucket, key)
-    except Exception:  # noqa: BLE001
-        _fail(f"object not found in {cfg.bucket}: {key}")
+    except Exception as exc:  # noqa: BLE001
+        _fail(_not_found_message(exc, cfg.bucket, key))
 
     url = _make_link(client, cfg, key, public, expiry)
     if webbrowser.open(url):
@@ -352,17 +351,11 @@ def prune(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
     """Delete objects whose tracked presigned link has expired."""
-    cfg = _load()
-    if bucket:
-        cfg.bucket = bucket
+    cfg = _apply_bucket(_load(), bucket)
 
     now = int(time.time())
     rows = db.records_for(cfg.bucket)
-    expired = [
-        k
-        for k, r in rows.items()
-        if r["expires_at"] is not None and r["expires_at"] < now
-    ]
+    expired = [k for k, r in rows.items() if _is_expired(r["expires_at"], now)]
     if not expired:
         console.print("Nothing to prune — no expired links tracked.")
         return
@@ -395,14 +388,25 @@ def _load() -> Config:
         _fail(str(exc))
 
 
-def _make_link(client, cfg: Config, key: str, public: bool, expiry: int) -> str:
+def _apply_bucket(cfg: Config, bucket: str | None) -> Config:
+    """Return cfg with an optional one-off bucket override (no in-place mutation)."""
+    return replace(cfg, bucket=bucket) if bucket else cfg
+
+
+def _require_public_base(cfg: Config, public: bool) -> None:
+    """Fail fast (before any upload) if a public link is requested but unconfigured."""
     if public:
-        return links.public_url(cfg, key)
-    return links.presigned_url(client, cfg.bucket, key, expiry)
+        try:
+            cfg.require_public_base_url()
+        except ConfigError as exc:
+            _fail(str(exc))
 
 
 def _resolve_expiry(cfg: Config, expiry: str | None, public: bool) -> int:
-    """Resolve --expiry (human string or None) to seconds and validate the range."""
+    """Resolve --expiry (human string or None) to seconds and validate the range.
+
+    This is the single home for expiry validation; downstream layers trust it.
+    """
     if expiry is None:
         secs = cfg.default_expiry
     else:
@@ -415,17 +419,50 @@ def _resolve_expiry(cfg: Config, expiry: str | None, public: bool) -> int:
     return secs
 
 
-def _record(cfg: Config, key: str, size: int, public: bool, expiry: int, url: str) -> None:
-    """Log the upload locally so `rink ls` can show link expiry."""
+def _validate_name(name: str) -> None:
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        _fail("--name must be a plain filename (no empty value, no slashes).")
+
+
+def _is_expired(expires_at: int | None, now: int | None = None) -> bool:
+    """True only for a presigned link whose deadline has passed."""
+    if expires_at is None:
+        return False
+    return expires_at <= (now if now is not None else int(time.time()))
+
+
+def _not_found_message(exc: Exception, bucket: str, key: str) -> str:
+    """Distinguish a genuine 404 from auth/network errors."""
+    from botocore.exceptions import ClientError
+
+    if isinstance(exc, ClientError):
+        code = exc.response.get("Error", {}).get("Code")
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return f"object not found in {bucket}: {key}"
+        return f"could not access {key}: {exc}"
+    return f"could not access {key}: {exc}"
+
+
+def _make_link(client, cfg: Config, key: str, public: bool, expiry: int) -> str:
+    if public:
+        return links.public_url(cfg, key)
+    return links.presigned_url(client, cfg.bucket, key, expiry)
+
+
+def _publish(client, cfg: Config, key: str, size: int, public: bool, expiry: int) -> LinkResult:
+    """Build the link, log it locally, and return a typed result (one home for all three)."""
+    url = _make_link(client, cfg, key, public, expiry)
     expires_at = None if public else int(time.time()) + expiry
+    link_type = "public" if public else "presigned"
     db.record(
         bucket=cfg.bucket,
         key=key,
         size=size,
-        link_type="public" if public else "presigned",
+        link_type=link_type,
         expires_at=expires_at,
         url=url,
     )
+    return LinkResult(key=key, size=size, url=url, link_type=link_type, expires_at=expires_at)
 
 
 @app.command()
@@ -468,20 +505,23 @@ def up(
     ),
 ) -> None:
     """Upload file(s)/folder(s) and print the link(s)."""
-    cfg = _load()
-    if bucket:
-        cfg.bucket = bucket
+    cfg = _apply_bucket(_load(), bucket)
     quiet = quiet or json_out  # machine/quiet modes suppress chatter
+    _require_public_base(cfg, public)
     expiry = _resolve_expiry(cfg, expiry, public)
 
     sources = _resolve_sources(paths)
+    if not sources:
+        _fail("no paths given.")
     # --name only makes sense when there's a single resulting object.
-    one = sources[0]
     single_object = len(sources) == 1 and (
-        one[0] in ("file", "stdin") or (one[0] == "folder" and zip_folder)
+        sources[0][0] in ("file", "stdin")
+        or (sources[0][0] == "folder" and zip_folder)
     )
-    if name and not single_object:
-        _fail("--name only works with a single file, stdin, or a zipped folder.")
+    if name:
+        if not single_object:
+            _fail("--name only works with a single file, stdin, or a zipped folder.")
+        _validate_name(name)
 
     client = uploader.make_client(cfg)
     extra = {"ContentDisposition": "attachment"} if download else None
@@ -495,20 +535,7 @@ def up(
             )
         )
 
-    results = []
-    for key, size in uploaded:
-        url = _make_link(client, cfg, key, public, expiry)
-        _record(cfg, key, size, public, expiry, url)
-        results.append(
-            {
-                "key": key,
-                "size": size,
-                "url": url,
-                "link_type": "public" if public else "presigned",
-                "expires_at": None if public else int(time.time()) + expiry,
-            }
-        )
-
+    results = [_publish(client, cfg, key, size, public, expiry) for key, size in uploaded]
     _render_results(results, public, expiry, quiet, json_out, copy, qr)
 
 
@@ -607,25 +634,37 @@ def _upload_recursive(client, cfg, folder, eff_prefix, extra, quiet, workers) ->
     base_prefix = uploader.build_key(eff_prefix, folder.name)
     total = sum(src.stat().st_size for src, _ in files)
     out: list[tuple[str, int]] = []
+    failures: list[tuple[str, Exception]] = []
+
+    progress = None if quiet else _progress_bar()
+    # rich.Progress.update isn't documented thread-safe; the callback fires from
+    # every worker (and boto's internal multipart threads), so guard it.
+    lock = threading.Lock()
 
     def do(src: Path, rel: str, advance) -> tuple[str, int]:
         key = f"{base_prefix}/{rel}"
         uploader.upload_file(client, cfg.bucket, src, key, progress=advance, extra=extra)
         return key, src.stat().st_size
 
-    progress = None if quiet else _progress_bar()
-    task = progress.add_task(f"{folder.name}/", total=total) if progress else None
-    advance = (lambda n: progress.update(task, advance=n)) if progress else None
-    if progress:
-        progress.start()
-    try:
+    with (progress or nullcontext()):
+        task = progress.add_task(f"{folder.name}/", total=total) if progress else None
+
+        def advance(n, _task=task):
+            with lock:
+                progress.update(_task, advance=n)
+
+        cb = advance if progress else None
         with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-            futs = [ex.submit(do, src, rel, advance) for src, rel in files]
-            for fut in as_completed(futs):
-                out.append(fut.result())
-    finally:
-        if progress:
-            progress.stop()
+            futmap = {ex.submit(do, src, rel, cb): rel for src, rel in files}
+            for fut in as_completed(futmap):
+                rel = futmap[fut]
+                try:
+                    out.append(fut.result())
+                except Exception as exc:  # noqa: BLE001 - collect, don't abort the batch
+                    failures.append((f"{base_prefix}/{rel}", exc))
+
+    for key, exc in failures:
+        err.print(f"[red]failed[/] {key}: {exc}")
     out.sort(key=lambda kv: kv[0])
     return out
 
@@ -639,27 +678,26 @@ def _summary(rows: list[tuple[str, int]]) -> None:
     console.print(table)
 
 
-def _human(n: int) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024 or unit == "TB":
+def _human(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if n < 1024 or unit == "PB":
             return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
         n /= 1024
-    return f"{n:.1f}TB"
 
 
-def _render_results(results, public, expiry, quiet, json_out, copy, qr) -> None:
+def _render_results(results: list[LinkResult], public, expiry, quiet, json_out, copy, qr) -> None:
     """Render upload results respecting the output flags."""
     if not results:
         _fail("nothing was uploaded.")
-    urls = [r["url"] for r in results]
+    urls = [r.url for r in results]
 
     if json_out:
-        print(jsonlib.dumps(results, indent=2))
+        print(jsonlib.dumps([asdict(r) for r in results], indent=2))
     elif quiet:
         for u in urls:
             print(u)
     else:
-        _summary([(r["key"], r["size"]) for r in results])
+        _summary([(r.key, r.size) for r in results])
         if len(results) == 1:
             tail = "" if public else f" (expires in {_human_duration(expiry)})"
             console.print(f"[dim]link{tail}:[/]")

@@ -2,7 +2,7 @@
 
 import pytest
 
-from rink import links, uploader, util
+from rink import cli, links, uploader, util
 from rink.config import Config, ConfigError, parse_duration
 
 
@@ -55,3 +55,27 @@ def test_random_token():
     t = util.random_token(4)
     assert len(t) == 8
     assert all(c in "0123456789abcdef" for c in t)
+
+
+@pytest.mark.parametrize(
+    "n,expected",
+    [(0, "0B"), (512, "512B"), (1024, "1.0KB"), (1536, "1.5KB"),
+     (1048576, "1.0MB"), (1024**4, "1.0TB"), (1024**5, "1.0PB")],
+)
+def test_human_sizes(n, expected):
+    assert cli._human(n) == expected
+
+
+@pytest.mark.parametrize(
+    "secs,expected",
+    [(0, "<1m"), (30, "<1m"), (90, "1m"), (3600, "1h"), (90061, "1d 1h")],
+)
+def test_human_duration(secs, expected):
+    assert cli._human_duration(secs) == expected
+
+
+def test_is_expired():
+    assert cli._is_expired(None) is False           # permanent
+    assert cli._is_expired(100, now=50) is False    # future
+    assert cli._is_expired(100, now=100) is True    # boundary == now
+    assert cli._is_expired(100, now=150) is True    # past
