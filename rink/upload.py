@@ -89,9 +89,15 @@ def _upload_one(client, cfg, src: Path, key: str, extra, quiet) -> tuple[str, in
 
 
 def _upload_zip(client, cfg, folder, name, eff_prefix, extra, quiet) -> tuple[str, int]:
-    if not quiet:
-        console.print(f"[dim]Zipping {folder}…[/]")
-    archive = uploader.zip_folder(folder)
+    if quiet:
+        archive = uploader.zip_folder(folder)
+    else:
+        total = sum(src.stat().st_size for src, _ in uploader.iter_files(folder))
+        with progress_bar() as progress:
+            task = progress.add_task(f"Zipping {folder.name}/", total=total)
+            archive = uploader.zip_folder(
+                folder, progress=lambda n: progress.update(task, advance=n)
+            )
     try:
         obj_name = name or archive.name
         if not obj_name.endswith(".zip"):

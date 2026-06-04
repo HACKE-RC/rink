@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import shutil
 import tempfile
+import zipfile
 from pathlib import Path
 
 import boto3
@@ -16,6 +16,9 @@ from .links import guess_content_type
 # Files at/above this size are uploaded in 8 MiB multipart chunks.
 _MB = 1024 * 1024
 _TRANSFER = TransferConfig(multipart_threshold=8 * _MB, multipart_chunksize=8 * _MB)
+
+# Chunk size for streaming files into the zip while reporting progress.
+_ZIP_CHUNK = 1024 * 1024
 
 
 def make_client(cfg: Config):
@@ -73,12 +76,27 @@ def upload_file(
     )
 
 
-def zip_folder(folder: Path) -> Path:
-    """Zip a folder into a temp .zip and return its path. Caller must delete it."""
+def zip_folder(folder: Path, progress=None) -> Path:
+    """Zip a folder into a temp .zip and return its path. Caller must delete it.
+
+    `progress` is an optional callable receiving bytes-read per chunk, so callers
+    can render a progress bar (zipping a large folder is otherwise silent).
+    """
     tmp_dir = Path(tempfile.mkdtemp(prefix="rink-"))
-    archive_base = tmp_dir / folder.name
-    archive = shutil.make_archive(str(archive_base), "zip", root_dir=str(folder))
-    return Path(archive)
+    archive = tmp_dir / f"{folder.name}.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path, rel in iter_files(folder):
+            if progress is None:
+                zf.write(path, rel)
+                continue
+            # Stream the file in so progress advances mid-file for large members.
+            zinfo = zipfile.ZipInfo.from_file(path, rel)
+            zinfo.compress_type = zipfile.ZIP_DEFLATED
+            with path.open("rb") as src, zf.open(zinfo, "w") as dst:
+                while chunk := src.read(_ZIP_CHUNK):
+                    dst.write(chunk)
+                    progress(len(chunk))
+    return archive
 
 
 def iter_files(folder: Path):
