@@ -28,6 +28,7 @@ from .render import (  # re-exported so tests can reach cli._human etc.
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
+    rich_markup_mode=None,  # plain Click-style errors, no boxed panels
     help="Upload files/folders to Cloudflare R2 and get a shareable link.",
 )
 
@@ -69,25 +70,40 @@ def _resolve_expiry(cfg: Config, expiry: str | None, public: bool) -> int:
         except ValueError as exc:
             _fail(str(exc))
     if not public and not (1 <= secs <= cfgmod.MAX_EXPIRY):
-        _fail("--expiry must be between 1s and 7d.")
+        _fail(
+            "--expiry must be between 1s and 7d.",
+            hint="presigned links cap at 7 days; for a permanent link use --public.",
+        )
     return secs
 
 
 def _validate_name(name: str) -> None:
     if not name or "/" in name or "\\" in name or name in (".", ".."):
-        _fail("--name must be a plain filename (no empty value, no slashes).")
+        _fail(
+            "--name must be a plain filename (no empty value, no slashes).",
+            hint="put folders in --prefix instead, e.g. --prefix docs/ --name report.pdf",
+        )
 
 
-def _not_found_message(exc: Exception, bucket: str, key: str) -> str:
-    """Distinguish a genuine 404 from auth/network errors."""
+def _not_found(exc: Exception, bucket: str, key: str) -> None:
+    """Fail with a message that distinguishes a genuine 404 from auth/network errors."""
     from botocore.exceptions import ClientError
 
     if isinstance(exc, ClientError):
         code = exc.response.get("Error", {}).get("Code")
         if code in ("404", "NoSuchKey", "NotFound"):
-            return f"object not found in {bucket}: {key}"
-        return f"could not access {key}: {exc}"
-    return f"could not access {key}: {exc}"
+            _fail(
+                f"object not found in {bucket}: {key}",
+                hint=f"run `rink ls` to see what's in {bucket}.",
+            )
+        _fail(
+            f"could not access {key}: {exc}",
+            hint="check your credentials and bucket with `rink config`.",
+        )
+    _fail(
+        f"could not access {key}: {exc}",
+        hint="check your network and credentials, then try again.",
+    )
 
 
 def _make_link(client, cfg: Config, key: str, public: bool, expiry: int) -> str:
@@ -181,7 +197,10 @@ def buckets() -> None:
     try:
         names = uploader.list_buckets(client)
     except Exception as exc:  # noqa: BLE001 - surface any boto/network error cleanly
-        _fail(f"could not list buckets: {exc}")
+        _fail(
+            f"could not list buckets: {exc}",
+            hint="R2 tokens are often scoped to one bucket; use `rink ls` or --bucket instead.",
+        )
 
     if not names:
         console.print("No buckets found in this account.")
@@ -255,7 +274,10 @@ def ls(
     try:
         objects = list(uploader.list_objects(client, cfg.bucket, prefix))
     except Exception as exc:  # noqa: BLE001
-        _fail(f"could not list objects: {exc}")
+        _fail(
+            f"could not list objects: {exc}",
+            hint="verify the bucket name and credentials with `rink config`.",
+        )
 
     tracked = db.records_for(cfg.bucket, prefix)
 
@@ -349,7 +371,7 @@ def link(
     try:
         head = uploader.head_object(client, cfg.bucket, key)
     except Exception as exc:  # noqa: BLE001
-        _fail(_not_found_message(exc, cfg.bucket, key))
+        _not_found(exc, cfg.bucket, key)
     size = int(head.get("ContentLength", 0))
 
     result = _publish(client, cfg, key, size, public, expiry)
@@ -372,7 +394,7 @@ def open_cmd(
     try:
         uploader.head_object(client, cfg.bucket, key)
     except Exception as exc:  # noqa: BLE001
-        _fail(_not_found_message(exc, cfg.bucket, key))
+        _not_found(exc, cfg.bucket, key)
 
     url = _make_link(client, cfg, key, public, expiry)
     if webbrowser.open(url):
@@ -473,7 +495,10 @@ def up(
     )
     if name:
         if not single_object:
-            _fail("--name only works with a single file, stdin, or a zipped folder.")
+            _fail(
+                "--name only works with a single file, stdin, or a zipped folder.",
+                hint="drop --name, or use --prefix to namespace a multi-file upload.",
+            )
         _validate_name(name)
 
     client = uploader.make_client(cfg)

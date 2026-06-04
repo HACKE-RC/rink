@@ -27,7 +27,10 @@ def resolve_sources(paths: list[str]):
             continue
         p = Path(raw)
         if not p.exists():
-            _fail(f"path does not exist: {raw}")
+            _fail(
+                f"path does not exist: {raw}",
+                hint="check the path, or use '-' to read from stdin (with --name).",
+            )
         out.append(("file" if p.is_file() else "folder", p))
     return out
 
@@ -44,7 +47,10 @@ def upload_source(client, cfg, kind, src, eff_prefix, name, zip_folder, extra, q
     """Upload one source, returning a list of (key, size)."""
     if kind == "stdin":
         if not name:
-            _fail("reading from stdin ('-') requires --name.")
+            _fail(
+                "reading from stdin ('-') requires --name.",
+                hint="e.g. cat report.pdf | rink up - --name report.pdf",
+            )
         tmp = Path(tempfile.mkdtemp(prefix="rink-")) / name
         tmp.write_bytes(sys.stdin.buffer.read())
         try:
@@ -99,7 +105,10 @@ def _upload_zip(client, cfg, folder, name, eff_prefix, extra, quiet) -> tuple[st
 def upload_recursive(client, cfg, folder, eff_prefix, extra, quiet, workers) -> list[tuple[str, int]]:
     files = list(uploader.iter_files(folder))
     if not files:
-        _fail(f"No files found under {folder}.")
+        _fail(
+            f"no files found under {folder}.",
+            hint="the folder is empty (or only has empty subdirs); nothing to upload.",
+        )
     base_prefix = uploader.build_key(eff_prefix, folder.name)
     total = sum(src.stat().st_size for src, _ in files)
     out: list[tuple[str, int]] = []

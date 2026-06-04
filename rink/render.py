@@ -27,8 +27,11 @@ console = Console()
 err = Console(stderr=True)
 
 
-def _fail(message: str) -> None:
-    err.print(f"[bold red]error:[/] {message}")
+def _fail(message: str, hint: str | None = None) -> None:
+    """Print a standard `error:` line (plus an optional next-step hint) and exit 1."""
+    err.print(f"error: {message}")
+    if hint:
+        err.print(f"hint: {hint}")
     raise typer.Exit(code=1)
 
 

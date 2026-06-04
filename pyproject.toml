@@ -1,6 +1,6 @@
 [project]
 name = "rink"
-version = "0.2.5"
+version = "0.2.6"
 description = "Upload files/folders to Cloudflare R2 and get a shareable link"
 readme = "README.md"
 requires-python = ">=3.10"
