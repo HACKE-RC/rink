@@ -66,10 +66,17 @@ changing the default.
 rink up ./report.pdf                  # presigned link (default expiry)
 rink up ./report.pdf --expiry 1d      # 1-day presigned link (30m, 2h, 7d, 1h30m…)
 rink up ./report.pdf --public         # permanent public link
+rink up ./report.pdf -c               # also copy the link to the clipboard
+rink up ./report.pdf --qr             # also print a scannable QR code
 rink up ./mydir                       # zip the folder, one link (default)
-rink up ./mydir --recursive           # upload each file, one link per file
+rink up ./mydir --recursive           # upload each file in parallel, link per file
+rink up *.png a.txt                   # multiple paths at once
+cat dump.sql | rink up - --name db.sql  # upload from stdin
 rink up ./big.bin --prefix backups/   # store under a key prefix
-rink up ./f.txt --bucket other-bucket # override the configured bucket
+rink up ./secret.pdf --random         # unguessable key prefix
+rink up ./report.pdf --download       # browser downloads instead of rendering
+rink up ./report.pdf --quiet          # print only the URL (for scripts / pipes)
+rink up ./report.pdf --json           # machine-readable output
 ```
 
 Options:
@@ -78,12 +85,21 @@ Options:
 |------|---------|---------|
 | `--public` / `--presigned` | `--presigned` | link type |
 | `--expiry <dur>` | config `default_expiry` | presigned lifetime: `30m`, `2h`, `7d`, `1h30m`, or bare seconds (max `7d`) |
-| `--zip` / `--recursive` | `--zip` | folder handling |
+| `--zip` / `--recursive` | `--zip` | folder handling (recursive uploads in parallel) |
 | `--prefix <str>` | none | key prefix in the bucket |
 | `--bucket <name>` | configured bucket | override target bucket |
+| `--name <str>` | source filename | object name (single upload; required for stdin) |
+| `--random` | off | prepend a random token to the key (unguessable links) |
+| `--download` | off | set `Content-Disposition: attachment` |
+| `--copy` / `-c` | off | copy link(s) to the clipboard |
+| `--qr` | off | print a QR code (single upload) |
+| `--quiet` / `-q` | off | print only the URL(s) |
+| `--json` | off | print results as JSON |
+| `--workers <n>` | `4` | parallel uploads for recursive folders |
 
 Large files (≥ 8 MiB) upload via multipart automatically with a progress bar. The
-URL(s) are printed on their own line(s) so they're easy to copy or pipe.
+URL(s) are printed on their own line(s) so they're easy to copy or pipe. Use `-` as a
+path to read from stdin (with `--name`).
 
 ## Listing, expiry, and deleting
 
@@ -91,8 +107,12 @@ URL(s) are printed on their own line(s) so they're easy to copy or pipe.
 rink ls                 # list objects in the bucket with each link's time-left
 rink ls backups/        # only keys under a prefix
 rink ls --expired       # only entries whose presigned link has already expired
+rink link myfile.zip    # regenerate a fresh link for an existing object (no re-upload)
+rink link myfile.zip --expiry 7d -c   # …with a new expiry, copied to clipboard
+rink open myfile.zip    # open the object's link in your browser
 rink rm myfile.zip      # delete an object (this is how you revoke access)
 rink rm a.txt b.txt -y  # delete several, skip the confirmation
+rink prune              # delete objects whose presigned link has expired
 ```
 
 `rink ls` reads the live bucket and joins it with a local log to show the **link**
@@ -112,3 +132,28 @@ row.
 Note: the **file itself never expires** — only the share link does. To make a file
 unreachable, delete it with `rink rm`. (R2 has no per-object private/public switch;
 publicity is bucket-wide, so deletion is the way to revoke.)
+
+## Development
+
+```sh
+uv sync --dev      # install with dev dependencies
+uv run pytest -q   # run the test suite (uses moto to mock S3; no network)
+```
+
+Tests live in `tests/`. GitHub Actions runs them on every push/PR across Python
+3.10–3.13.
+
+## Releasing
+
+Releases publish to PyPI automatically when you push a version tag:
+
+```sh
+# bump the version in pyproject.toml and rink/__init__.py, then:
+git tag v0.2.0
+git push --tags
+```
+
+The `publish` workflow uses PyPI **Trusted Publishing** (OIDC) — no token stored in
+GitHub. One-time setup on PyPI: project `rink` → *Settings* → *Publishing* → add a
+GitHub publisher (owner `HACKE-RC`, repo `rink`, workflow `publish.yml`, environment
+`pypi`). Until that's configured, publish manually with `uv build && uv publish`.

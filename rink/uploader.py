@@ -56,16 +56,27 @@ def delete_object(client, bucket: str, key: str) -> None:
     client.delete_object(Bucket=bucket, Key=key)
 
 
-def upload_file(client, bucket: str, src: Path, key: str, progress=None) -> Uploaded:
+def head_object(client, bucket: str, key: str) -> dict:
+    """Return object metadata (raises ClientError 404 if it doesn't exist)."""
+    return client.head_object(Bucket=bucket, Key=key)
+
+
+def upload_file(
+    client, bucket: str, src: Path, key: str, progress=None, extra: dict | None = None
+) -> Uploaded:
     """Upload a single file, with automatic multipart for large files.
 
     `progress` is an optional callable receiving bytes-transferred per chunk.
+    `extra` adds/overrides S3 ExtraArgs (e.g. ContentDisposition).
     """
+    extra_args = {"ContentType": guess_content_type(key)}
+    if extra:
+        extra_args.update(extra)
     client.upload_file(
         str(src),
         bucket,
         key,
-        ExtraArgs={"ContentType": guess_content_type(key)},
+        ExtraArgs=extra_args,
         Config=_TRANSFER,
         Callback=progress,
     )

@@ -1,0 +1,22 @@
+name: publish
+
+# Publishes to PyPI when you push a version tag, e.g. `git tag v0.2.0 && git push --tags`.
+#
+# Uses PyPI Trusted Publishing (OIDC) — no API token stored in GitHub. One-time setup
+# on PyPI: project `rink` → Settings → Publishing → Add a GitHub publisher with
+#   owner: HACKE-RC   repo: rink   workflow: publish.yml   environment: pypi
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # required for trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv build
+      - run: uv publish
