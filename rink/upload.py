@@ -76,7 +76,7 @@ def _upload_one(client, cfg, src: Path, key: str, extra, quiet) -> tuple[str, in
         uploader.upload_file(client, cfg.bucket, src, key, extra=extra)
     else:
         with progress_bar() as progress:
-            task = progress.add_task(src.name, total=size)
+            task = progress.add_task(f"Uploading {src.name}", total=size)
             uploader.upload_file(
                 client,
                 cfg.bucket,
@@ -85,6 +85,7 @@ def _upload_one(client, cfg, src: Path, key: str, extra, quiet) -> tuple[str, in
                 progress=lambda n: progress.update(task, advance=n),
                 extra=extra,
             )
+            progress.update(task, completed=size, description=f"✅ Uploaded {src.name}")
     return key, size
 
 
@@ -98,6 +99,7 @@ def _upload_zip(client, cfg, folder, name, eff_prefix, extra, quiet) -> tuple[st
             archive = uploader.zip_folder(
                 folder, progress=lambda n: progress.update(task, advance=n)
             )
+            progress.update(task, completed=total, description=f"✅ Zipped {folder.name}/")
     try:
         obj_name = name or archive.name
         if not obj_name.endswith(".zip"):
@@ -131,7 +133,7 @@ def upload_recursive(client, cfg, folder, eff_prefix, extra, quiet, workers) -> 
         return key, src.stat().st_size
 
     with (progress or nullcontext()):
-        task = progress.add_task(f"{folder.name}/", total=total) if progress else None
+        task = progress.add_task(f"Uploading {folder.name}/", total=total) if progress else None
 
         def advance(n, _task=task):
             with lock:
@@ -146,6 +148,13 @@ def upload_recursive(client, cfg, folder, eff_prefix, extra, quiet, workers) -> 
                     out.append(fut.result())
                 except Exception as exc:  # noqa: BLE001 - collect, don't abort the batch
                     failures.append((f"{base_prefix}/{rel}", exc))
+        if progress:
+            done_description = (
+                f"❌ Upload failed {folder.name}/"
+                if failures
+                else f"✅ Uploaded {folder.name}/"
+            )
+            progress.update(task, completed=total, description=done_description)
 
     for key, exc in failures:
         err.print(f"[red]failed[/] {key}: {exc}")
