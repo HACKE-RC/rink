@@ -145,15 +145,22 @@ Tests live in `tests/`. GitHub Actions runs them on every push/PR across Python
 
 ## Releasing
 
-Releases publish to PyPI automatically when you push a version tag:
+Releases publish to PyPI automatically when you push a version tag — pushing the tag
+is the whole release:
 
 ```sh
-# bump the version in pyproject.toml and rink/__init__.py, then:
-git tag v0.2.0
+# bump the version in pyproject.toml and rink/__init__.py, commit, then:
+git tag v0.2.5
 git push --tags
 ```
 
-The `publish` workflow uses PyPI **Trusted Publishing** (OIDC) — no token stored in
-GitHub. One-time setup on PyPI: project `rink` → *Settings* → *Publishing* → add a
-GitHub publisher (owner `HACKE-RC`, repo `rink`, workflow `publish.yml`, environment
-`pypi`). Until that's configured, publish manually with `uv build && uv publish`.
+The `publish` workflow uses PyPI **Trusted Publishing** (OIDC), already configured for
+this project — no API token is stored in GitHub. On each `v*` tag, GitHub Actions mints
+a short-lived token and uploads the build to PyPI.
+
+Notes:
+- **Bump the version every release.** PyPI versions are immutable; a tag whose version
+  already exists on PyPI will fail at upload. Keep the `vX.Y.Z` tag and the version in
+  `pyproject.toml`/`rink/__init__.py` in sync.
+- If a release fails *before* upload, the version stays free — fix the issue and
+  `gh run rerun` the same tag. If it fails *after* upload, bump to a new version.
