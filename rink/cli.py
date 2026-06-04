@@ -24,6 +24,7 @@ from .config import Config, ConfigError
 
 app = typer.Typer(
     add_completion=False,
+    no_args_is_help=True,
     help="Upload files/folders to Cloudflare R2 and get a shareable link.",
 )
 console = Console()
@@ -70,10 +71,15 @@ def config() -> None:
         "Public base URL (optional, e.g. https://pub-xxxx.r2.dev)",
         default=existing.get("public_base_url", ""),
     )
-    default_expiry = Prompt.ask(
-        "Default presigned link expiry (seconds)",
-        default=str(existing.get("default_expiry", cfgmod.DEFAULT_EXPIRY)),
+    current_expiry = int(existing.get("default_expiry", cfgmod.DEFAULT_EXPIRY))
+    expiry_input = Prompt.ask(
+        "Default presigned link expiry (e.g. 30m, 1h, 7d)",
+        default=_human_duration(current_expiry),
     )
+    try:
+        default_expiry = cfgmod.parse_duration(expiry_input)
+    except ValueError as exc:
+        _fail(str(exc))
 
     cfg = Config(
         account_id=account_id.strip(),
@@ -301,8 +307,10 @@ def up(
         "--public/--presigned",
         help="Return a permanent public URL instead of a presigned one.",
     ),
-    expiry: int = typer.Option(
-        None, "--expiry", help="Presigned link lifetime in seconds (<= 604800)."
+    expiry: str = typer.Option(
+        None,
+        "--expiry",
+        help="Presigned link lifetime, e.g. 30m, 2h, 7d (max 7d). Default from config.",
     ),
     zip_folder: bool = typer.Option(
         True,
@@ -318,17 +326,17 @@ def up(
     cfg = _load()
     if bucket:
         cfg.bucket = bucket
-    expiry = expiry if expiry is not None else cfg.default_expiry
 
-    if not public:
+    if expiry is None:
+        expiry = cfg.default_expiry
+    else:
         try:
-            # Validate early so we fail before uploading.
-            from .config import MAX_EXPIRY
+            expiry = cfgmod.parse_duration(expiry)
+        except ValueError as exc:
+            _fail(str(exc))
 
-            if not (1 <= expiry <= MAX_EXPIRY):
-                raise ValueError
-        except ValueError:
-            _fail("--expiry must be between 1 and 604800 seconds (7 days).")
+    if not public and not (1 <= expiry <= cfgmod.MAX_EXPIRY):
+        _fail("--expiry must be between 1s and 7d.")
 
     client = uploader.make_client(cfg)
 
@@ -382,7 +390,7 @@ def _human(n: int) -> str:
 
 def _print_link(label: str, url: str, expiry: int | None) -> None:
     if expiry is not None:
-        console.print(f"[dim]{label} (expires in {expiry}s):[/]")
+        console.print(f"[dim]{label} (expires in {_human_duration(expiry)}):[/]")
     else:
         console.print(f"[dim]{label}:[/]")
     # Plain print so it is easy to copy / pipe.
@@ -450,7 +458,7 @@ def _upload_recursive(client, cfg, folder, prefix, public, expiry):
     if public:
         console.print("[dim]links:[/]")
     else:
-        console.print(f"[dim]links (expire in {expiry}s):[/]")
+        console.print(f"[dim]links (expire in {_human_duration(expiry)}):[/]")
     for key, url in results:
         print(url)
 

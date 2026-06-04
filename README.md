@@ -1,7 +1,7 @@
 # rink
 
-A small CLI that uploads a file or folder to a Cloudflare R2 bucket and prints a
-shareable link. R2 is S3-compatible, so `rink` talks to it with `boto3`.
+Rink uploads any file or folder from your terminal directly to a Cloudflare R2
+bucket and gives you a link!
 
 R2 objects are **private by default**, so `rink` gives you two kinds of link:
 
@@ -64,7 +64,7 @@ changing the default.
 
 ```sh
 rink up ./report.pdf                  # presigned link (default expiry)
-rink up ./report.pdf --expiry 86400   # 1-day presigned link
+rink up ./report.pdf --expiry 1d      # 1-day presigned link (30m, 2h, 7d, 1h30m…)
 rink up ./report.pdf --public         # permanent public link
 rink up ./mydir                       # zip the folder, one link (default)
 rink up ./mydir --recursive           # upload each file, one link per file
@@ -77,7 +77,7 @@ Options:
 | flag | default | meaning |
 |------|---------|---------|
 | `--public` / `--presigned` | `--presigned` | link type |
-| `--expiry <sec>` | config `default_expiry` | presigned lifetime (≤ 604800) |
+| `--expiry <dur>` | config `default_expiry` | presigned lifetime: `30m`, `2h`, `7d`, `1h30m`, or bare seconds (max `7d`) |
 | `--zip` / `--recursive` | `--zip` | folder handling |
 | `--prefix <str>` | none | key prefix in the bucket |
 | `--bucket <name>` | configured bucket | override target bucket |

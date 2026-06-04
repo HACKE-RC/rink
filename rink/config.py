@@ -8,6 +8,7 @@ variable (RINK_*) so secrets can stay out of the file if preferred.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,30 @@ _ENV_OVERRIDES = {
 
 class ConfigError(Exception):
     """Raised when configuration is missing or invalid."""
+
+
+_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+_DURATION_TOKEN = re.compile(r"(\d+)([smhdw])")
+
+
+def parse_duration(text: str) -> int:
+    """Parse a human duration into seconds.
+
+    Accepts a bare integer (seconds), a single unit ('30m', '2h', '7d', '1w'),
+    or a compound ('1h30m'). Units: s, m, h, d, w. Case-insensitive.
+    """
+    text = text.strip().lower()
+    if not text:
+        raise ValueError("empty duration")
+    if text.isdigit():
+        return int(text)
+    tokens = _DURATION_TOKEN.findall(text)
+    # Reject anything we didn't fully consume (e.g. '2x', '1h foo').
+    if not tokens or "".join(n + u for n, u in tokens) != text:
+        raise ValueError(
+            f"invalid duration {text!r} — use e.g. 30m, 2h, 7d, 1h30m, or seconds"
+        )
+    return sum(int(n) * _UNIT_SECONDS[u] for n, u in tokens)
 
 
 @dataclass
