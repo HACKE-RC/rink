@@ -1,144 +1,229 @@
 # rink
 
-Rink uploads any file or folder from your terminal directly to a Cloudflare R2
-bucket and gives you a link!
+[![PyPI version](https://img.shields.io/pypi/v/rink.svg?color=blue)](https://pypi.org/project/rink/)
+[![Python versions](https://img.shields.io/pypi/pyversions/rink.svg)](https://pypi.org/project/rink/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/HACKE-RC/rink/blob/master/LICENSE)
 
-R2 objects are **private by default**, so `rink` gives you two kinds of link:
+`rink` is a fast, terminal-first utility to upload files or directories directly to a Cloudflare R2 bucket and instantly get a shareable URL.
 
-- **Presigned** (default) — a signed, self-expiring URL (up to 7 days). No bucket
-  config needed.
-- **Public** — a permanent `https://pub-xxxx.r2.dev/<key>` (or custom-domain) URL,
-  available after you enable public access on the bucket.
+Cloudflare R2 objects are private by default, so `rink` provides two ways to share:
+- **Presigned Links (Default)**: A secure, signed URL that automatically expires (up to 7 days). Does not require public bucket access.
+- **Public Links**: A permanent URL (`https://<pub-domain>/<key>`) using your bucket's public access domain.
 
-## One-time Cloudflare setup
+---
 
-1. **Account ID** — Cloudflare dashboard → R2 → copy the Account ID.
-2. **Create a bucket** — dashboard → R2 → *Create bucket*, or
-   `wrangler r2 bucket create <name>`.
-3. **API token** — dashboard → R2 → *Manage R2 API Tokens* → *Create API Token*
-   with **Object Read & Write**. Copy the **Access Key ID** and **Secret Access Key**.
-4. *(public links only)* bucket → Settings → enable **Public Development URL**, and
-   copy the `pub-xxxx.r2.dev` domain.
+## Features
 
-## Install
+- **Direct Uploads**: Single files, multiple files, folders, or piped input from standard input (`stdin`).
+- **Flexible Folder Handling**: Zip directories automatically into a single file, or upload them recursively in parallel.
+- **Terminal Enhancements**: Copy links directly to your clipboard (`-c`) or display scannable QR codes (`--qr`).
+- **Track Expirations**: Uses a lightweight local SQLite database to track presigned URLs and their remaining lifespan.
+- **Multipart Uploads**: Automatically switches to multipart uploads for files ≥ 8 MiB with smooth progress bars.
+- **Self-Cleaning**: Easily list expired links and prune them from R2 to keep your storage clean.
 
-From PyPI:
+---
 
-```sh
-uv tool install rink     # install as a CLI on your PATH (recommended)
-uv pip install rink      # or into the active environment
-pip install rink         # or with plain pip
+## Installation
+
+Install `rink` via PyPI. We recommend using `uv` for easy tool management, but standard `pip` works too.
+
+### Using `uv` (Recommended)
+```bash
+# Install as a global CLI tool on your PATH
+uv tool install rink
+
+# Or install into your active environment
+uv pip install rink
 ```
 
-From source (for development):
-
-```sh
-uv sync                 # install deps into the project venv
-uv run rink --help      # run from the project
-uv tool install .       # install this checkout as a tool on your PATH
+### Using `pip` or `pipx`
+```bash
+pipx install rink
+# or
+pip install rink
 ```
 
-## Configure
+### From Source (Development)
+```bash
+# Clone the repository and sync dependencies
+git clone https://github.com/HACKE-RC/rink.git
+cd rink
+uv sync
 
-```sh
-rink config             # interactive wizard
+# Run from the project
+uv run rink --help
+
+# Install the local checkout as a global tool
+uv tool install .
 ```
 
-Writes `~/.config/rink/config.toml` (mode 600). Every field can also be supplied via
-environment variables, which override the file:
-`RINK_ACCOUNT_ID`, `RINK_ACCESS_KEY_ID`, `RINK_SECRET_ACCESS_KEY`, `RINK_BUCKET`,
-`RINK_PUBLIC_BASE_URL`.
+---
 
-## Buckets
+## One-Time Cloudflare Setup
 
-```sh
-rink buckets            # list all buckets in the account (default is marked ●)
-rink use                # interactive picker to choose the default bucket
-rink use my-bucket      # set the default bucket directly
+Before using `rink`, you need to retrieve your Cloudflare credentials and create a bucket:
+
+1. **Get Account ID**: Go to the [Cloudflare Dashboard](https://dash.cloudflare.com/) → **R2** → Copy the **Account ID** from the right sidebar.
+2. **Create a Bucket**: Click **Create bucket** in the dashboard, or run `wrangler r2 bucket create <name>`.
+3. **Generate API Token**: 
+   - Click **Manage R2 API Tokens** → **Create API Token**.
+   - Select permissions: **Object Read & Write**.
+   - Copy the **Access Key ID** and **Secret Access Key**.
+4. *(Optional for Public Links)*: In your bucket's page → **Settings** → **Public Access** → Enable **Public Development URL** (or configure a custom domain) and copy the `pub-xxxx.r2.dev` address.
+
+---
+
+## Quick Start
+
+Initialize `rink` using the interactive setup wizard:
+
+```bash
+rink config
+```
+This wizard will prompt you for your Account ID, Access Keys, default bucket name, and preferred link configurations.
+
+### Configuration Storage
+Your settings are saved at `~/.config/rink/config.toml` (file mode `600` for security). 
+
+You can also use environment variables to configure `rink` or override config files:
+- `RINK_ACCOUNT_ID`
+- `RINK_ACCESS_KEY_ID`
+- `RINK_SECRET_ACCESS_KEY`
+- `RINK_BUCKET`
+- `RINK_PUBLIC_BASE_URL`
+
+---
+
+## Usage & Command Reference
+
+### Uploading Files (`rink up`)
+Upload one or more files/directories and print their shareable links.
+
+```bash
+# Upload a single file with default expiry (signed URL)
+rink up report.pdf
+
+# Upload and copy the link directly to clipboard
+rink up report.pdf -c
+
+# Generate a scannable terminal QR code for the upload
+rink up report.pdf --qr
+
+# Upload with a custom expiration (e.g. 30m, 2h, 7d, 1h30m, or bare seconds)
+rink up report.pdf --expiry 1d
+
+# Upload as a permanent public link (requires public URL setup)
+rink up report.pdf --public
+
+# Pipe content directly from stdin (requires --name)
+cat logs.txt | rink up - --name system_logs.txt
+
+# Prefix files or randomize the upload paths for privacy
+rink up invoice.pdf --prefix backups/
+rink up secret.docx --random
+
+# Force browsers to download the file instead of viewing it inline
+rink up photo.png --download
 ```
 
-`rink up --bucket <name>` still overrides the bucket for a single upload without
-changing the default.
+#### Upload Options
+| Flag | Default | Description |
+| :--- | :--- | :--- |
+| `--public` / `--presigned` | `--presigned` | Choose link type (public permanent or presigned temporary). |
+| `--expiry <duration>` | Config default | Presigned URL duration (e.g. `30m`, `2h`, `7d`). Max `7d`. |
+| `--zip` / `--recursive` | `--zip` | Folders: zip into one file, or upload contents recursively in parallel. |
+| `--workers <count>` | `4` | Number of parallel upload workers for recursive directories. |
+| `--prefix <string>` | None | Object key prefix path in the bucket. |
+| `--bucket <name>` | Config bucket | Override the target bucket. |
+| `--name <string>` | Source filename | Destination key name (required for stdin). |
+| `--random` | Off | Prepend a random string to the destination key for unguessable links. |
+| `--download` | Off | Forces the browser to download the file (`Content-Disposition: attachment`). |
+| `--copy`, `-c` | Off | Copies the generated URL(s) to the clipboard. |
+| `--qr` | Off | Prints a terminal QR code for the uploaded file link. |
+| `--quiet`, `-q` | Off | Prints only the URL(s) (useful for scripting and piping). |
+| `--json` | Off | Formats command output as JSON. |
 
-## Usage
+---
 
-```sh
-rink up ./report.pdf                  # presigned link (default expiry)
-rink up ./report.pdf --expiry 1d      # 1-day presigned link (30m, 2h, 7d, 1h30m…)
-rink up ./report.pdf --public         # permanent public link
-rink up ./report.pdf -c               # also copy the link to the clipboard
-rink up ./report.pdf --qr             # also print a scannable QR code
-rink up ./mydir                       # zip the folder, one link (default)
-rink up ./mydir --recursive           # upload each file in parallel, link per file
-rink up *.png a.txt                   # multiple paths at once
-cat dump.sql | rink up - --name db.sql  # upload from stdin
-rink up ./big.bin --prefix backups/   # store under a key prefix
-rink up ./secret.pdf --random         # unguessable key prefix
-rink up ./report.pdf --download       # browser downloads instead of rendering
-rink up ./report.pdf --quiet          # print only the URL (for scripts / pipes)
-rink up ./report.pdf --json           # machine-readable output
+### Listing & Managing Buckets
+```bash
+# List all R2 buckets in your Cloudflare account
+rink buckets
+
+# Pick a default bucket interactively
+rink use
+
+# Set default bucket directly
+rink use my-bucket
 ```
 
-Options:
+### Listing & Regenerating Links (`rink ls`, `rink link`, `rink open`)
+```bash
+# List all tracked uploads with their remaining lifetime
+rink ls
 
-| flag | default | meaning |
-|------|---------|---------|
-| `--public` / `--presigned` | `--presigned` | link type |
-| `--expiry <dur>` | config `default_expiry` | presigned lifetime: `30m`, `2h`, `7d`, `1h30m`, or bare seconds (max `7d`) |
-| `--zip` / `--recursive` | `--zip` | folder handling (recursive uploads in parallel) |
-| `--prefix <str>` | none | key prefix in the bucket |
-| `--bucket <name>` | configured bucket | override target bucket |
-| `--name <str>` | source filename | object name (single upload; required for stdin) |
-| `--random` | off | prepend a random token to the key (unguessable links) |
-| `--download` | off | set `Content-Disposition: attachment` |
-| `--copy` / `-c` | off | copy link(s) to the clipboard |
-| `--qr` | off | print a QR code (single upload) |
-| `--quiet` / `-q` | off | print only the URL(s) |
-| `--json` | off | print results as JSON |
-| `--workers <n>` | `4` | parallel uploads for recursive folders |
+# Filter tracked files by bucket prefix
+rink ls backups/
 
-Large files (≥ 8 MiB) upload via multipart automatically with a progress bar. The
-URL(s) are printed on their own line(s) so they're easy to copy or pipe. Use `-` as a
-path to read from stdin (with `--name`).
+# Filter to show only files with expired presigned links
+rink ls --expired
 
-## Listing, expiry, and deleting
+# Regenerate a fresh URL for an existing file (without re-uploading)
+rink link invoice.pdf --expiry 7d -c
 
-```sh
-rink ls                 # list objects in the bucket with each link's time-left
-rink ls backups/        # only keys under a prefix
-rink ls --expired       # only entries whose presigned link has already expired
-rink link myfile.zip    # regenerate a fresh link for an existing object (no re-upload)
-rink link myfile.zip --expiry 7d -c   # …with a new expiry, copied to clipboard
-rink open myfile.zip    # open the object's link in your browser
-rink rm myfile.zip      # delete an object (this is how you revoke access)
-rink rm a.txt b.txt -y  # delete several, skip the confirmation
-rink prune              # delete objects whose presigned link has expired
+# Open an uploaded file's URL in your default web browser
+rink open invoice.pdf
 ```
 
-`rink ls` reads the live bucket and joins it with a local log to show the **link**
-column:
+### Deleting & Revoking Access (`rink rm`, `rink prune`)
+To revoke access to a file, you must delete it from the bucket.
+```bash
+# Delete an object and clear its tracking log
+rink rm report.pdf
 
-- `2h` / `1d 3h` — time left on the presigned link
-- `permanent` — shared via a public link (never expires)
-- `untracked` — object exists in the bucket but wasn't uploaded by `rink`, so we
-  don't know its link expiry
+# Delete multiple files and skip verification prompts
+rink rm image1.png image2.png -y
 
-**Why a local log?** R2 stores *files*, not links. A presigned URL's expiry is baked
-into the URL string at generation time — R2 keeps no record of it. So `rink` logs each
-upload to a small SQLite database at `~/.local/share/rink/rink.db` (stdlib, no extra
-deps) to report time-left. Deleting with `rink rm` removes both the object and its log
-row.
+# Delete all R2 files whose tracked presigned links have expired
+rink prune
+```
 
-Note: the **file itself never expires** — only the share link does. To make a file
-unreachable, delete it with `rink rm`. (R2 has no per-object private/public switch;
-publicity is bucket-wide, so deletion is the way to revoke.)
+---
+
+## How It Works (Under the Hood)
+
+Since Cloudflare R2 stores raw object files rather than temporary share links, R2 has no native concept of "when a presigned link expires". A presigned URL's expiration is computed cryptographically and embedded directly in the URL query string.
+
+To solve this, `rink` maintains a lightweight local SQLite database at `~/.local/share/rink/rink.db`.
+- Every time you perform an upload, `rink` logs the object key, bucket name, and link expiration timestamp locally.
+- Running `rink ls` joins live bucket object information with this local log to determine exactly how much time is left on each link.
+- Objects uploaded outside of `rink` (or whose local log records are missing) will show up as `untracked`.
+- Deleting an object via `rink rm` deletes it from R2 and removes its tracking entry from your database.
+
+> [!NOTE]
+> Presigned link expiration **does not delete the file** from R2; it only makes the URL invalid. To save bucket space, run `rink prune` to delete expired files from your bucket.
+
+---
 
 ## Development
 
-```sh
-uv sync --dev      # install with dev dependencies
-uv run pytest -q   # run the test suite (uses moto to mock S3; no network)
-```
+Contributions are welcome! To set up your local development environment:
 
-Tests live in `tests/`. GitHub Actions runs them on every push/PR across Python
-3.10–3.13.
+1. Clone the repository and install dev dependencies:
+   ```bash
+   uv sync --dev
+   ```
+2. Run tests (we use `moto` to mock S3/R2 requests locally; no live network calls are made):
+   ```bash
+   uv run pytest -v
+   ```
+3. Run tests quietly:
+   ```bash
+   uv run pytest -q
+   ```
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
