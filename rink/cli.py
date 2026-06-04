@@ -1,58 +1,118 @@
-"""rink CLI — `rink config` and `rink up <path>`."""
+"""rink CLI — thin command layer over the upload pipeline (`upload`) and renderer (`render`)."""
 
 from __future__ import annotations
 
-import json as jsonlib
-import shutil
-import sys
-import tempfile
-import threading
 import time
 import webbrowser
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import nullcontext
-from dataclasses import asdict, dataclass, replace
-from pathlib import Path
+from dataclasses import replace
 
 import typer
-from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    DownloadColumn,
-    Progress,
-    TextColumn,
-    TransferSpeedColumn,
-)
 from rich.prompt import Prompt
 from rich.table import Table
 
 from . import config as cfgmod
-from . import db, links, uploader, util
+from . import db, links, upload, uploader
 from .config import Config, ConfigError
+from .render import (  # re-exported so tests can reach cli._human etc.
+    LinkResult,
+    _fail,
+    _fmt_remaining,
+    _human,
+    _human_duration,
+    _is_expired,
+    console,
+    err,
+    render_results,
+)
 
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
     help="Upload files/folders to Cloudflare R2 and get a shareable link.",
 )
-console = Console()
-err = Console(stderr=True)
 
 
-def _fail(message: str) -> None:
-    err.print(f"[bold red]error:[/] {message}")
-    raise typer.Exit(code=1)
+# --------------------------------------------------------------------------- glue
 
 
-@dataclass
-class LinkResult:
-    """One published object + its shareable link."""
+def _load() -> Config:
+    try:
+        return cfgmod.load_config()
+    except ConfigError as exc:
+        _fail(str(exc))
 
-    key: str
-    size: int
-    url: str
-    link_type: str  # "presigned" | "public"
-    expires_at: int | None
+
+def _apply_bucket(cfg: Config, bucket: str | None) -> Config:
+    """Return cfg with an optional one-off bucket override (no in-place mutation)."""
+    return replace(cfg, bucket=bucket) if bucket else cfg
+
+
+def _require_public_base(cfg: Config, public: bool) -> None:
+    """Fail fast (before any upload) if a public link is requested but unconfigured."""
+    if public:
+        try:
+            cfg.require_public_base_url()
+        except ConfigError as exc:
+            _fail(str(exc))
+
+
+def _resolve_expiry(cfg: Config, expiry: str | None, public: bool) -> int:
+    """Resolve --expiry (human string or None) to seconds and validate the range.
+
+    This is the single home for expiry validation; downstream layers trust it.
+    """
+    if expiry is None:
+        secs = cfg.default_expiry
+    else:
+        try:
+            secs = cfgmod.parse_duration(expiry)
+        except ValueError as exc:
+            _fail(str(exc))
+    if not public and not (1 <= secs <= cfgmod.MAX_EXPIRY):
+        _fail("--expiry must be between 1s and 7d.")
+    return secs
+
+
+def _validate_name(name: str) -> None:
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        _fail("--name must be a plain filename (no empty value, no slashes).")
+
+
+def _not_found_message(exc: Exception, bucket: str, key: str) -> str:
+    """Distinguish a genuine 404 from auth/network errors."""
+    from botocore.exceptions import ClientError
+
+    if isinstance(exc, ClientError):
+        code = exc.response.get("Error", {}).get("Code")
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return f"object not found in {bucket}: {key}"
+        return f"could not access {key}: {exc}"
+    return f"could not access {key}: {exc}"
+
+
+def _make_link(client, cfg: Config, key: str, public: bool, expiry: int) -> str:
+    if public:
+        return links.public_url(cfg, key)
+    return links.presigned_url(client, cfg.bucket, key, expiry)
+
+
+def _publish(client, cfg: Config, key: str, size: int, public: bool, expiry: int) -> LinkResult:
+    """Build the link, log it locally, and return a typed result (one home for all three)."""
+    url = _make_link(client, cfg, key, public, expiry)
+    expires_at = None if public else int(time.time()) + expiry
+    link_type = "public" if public else "presigned"
+    db.record(
+        bucket=cfg.bucket,
+        key=key,
+        size=size,
+        link_type=link_type,
+        expires_at=expires_at,
+        url=url,
+    )
+    return LinkResult(key=key, size=size, url=url, link_type=link_type, expires_at=expires_at)
+
+
+# ------------------------------------------------------------------------ commands
 
 
 @app.command()
@@ -178,32 +238,8 @@ def use(
             console.print("Aborted.")
             raise typer.Exit()
 
-    cfg.bucket = bucket
-    cfgmod.save_config(cfg)
+    cfgmod.save_config(replace(cfg, bucket=bucket))
     console.print(f"[green]Default bucket set to[/] {bucket}")
-
-
-def _fmt_remaining(expires_at: int | None) -> str:
-    """Human 'time left' for a presigned link, or a marker for other states."""
-    if expires_at is None:
-        return "[green]permanent[/]"
-    if _is_expired(expires_at):
-        return "[red]expired[/]"
-    return _human_duration(expires_at - int(time.time()))
-
-
-def _human_duration(secs: int) -> str:
-    days, rem = divmod(secs, 86400)
-    hours, rem = divmod(rem, 3600)
-    mins, _ = divmod(rem, 60)
-    parts = []
-    if days:
-        parts.append(f"{days}d")
-    if hours:
-        parts.append(f"{hours}h")
-    if mins and not days:
-        parts.append(f"{mins}m")
-    return " ".join(parts) or "<1m"
 
 
 @app.command(name="ls")
@@ -224,7 +260,9 @@ def ls(
     tracked = db.records_for(cfg.bucket, prefix)
 
     if not objects:
-        console.print(f"No objects in [bold]{cfg.bucket}[/]" + (f" under '{prefix}'" if prefix else ""))
+        console.print(
+            f"No objects in [bold]{cfg.bucket}[/]" + (f" under '{prefix}'" if prefix else "")
+        )
         return
 
     table = Table(show_header=True, header_style="bold")
@@ -272,11 +310,10 @@ def rm(
     client = uploader.make_client(cfg)
 
     if not yes:
-        console.print("About to delete from [bold]{}[/]:".format(cfg.bucket))
+        console.print(f"About to delete from [bold]{cfg.bucket}[/]:")
         for k in keys:
             console.print(f"  • {k}")
-        confirm = Prompt.ask("Delete?", choices=["y", "n"], default="n")
-        if confirm != "y":
+        if Prompt.ask("Delete?", choices=["y", "n"], default="n") != "y":
             console.print("Aborted.")
             raise typer.Exit()
 
@@ -316,7 +353,7 @@ def link(
     size = int(head.get("ContentLength", 0))
 
     result = _publish(client, cfg, key, size, public, expiry)
-    _render_results([result], public, expiry, quiet, json_out, copy, qr)
+    render_results([result], public, expiry, quiet, json_out, copy, qr)
 
 
 @app.command(name="open")
@@ -381,90 +418,6 @@ def prune(
             err.print(f"[red]failed[/] {k}: {exc}")
 
 
-def _load() -> Config:
-    try:
-        return cfgmod.load_config()
-    except ConfigError as exc:
-        _fail(str(exc))
-
-
-def _apply_bucket(cfg: Config, bucket: str | None) -> Config:
-    """Return cfg with an optional one-off bucket override (no in-place mutation)."""
-    return replace(cfg, bucket=bucket) if bucket else cfg
-
-
-def _require_public_base(cfg: Config, public: bool) -> None:
-    """Fail fast (before any upload) if a public link is requested but unconfigured."""
-    if public:
-        try:
-            cfg.require_public_base_url()
-        except ConfigError as exc:
-            _fail(str(exc))
-
-
-def _resolve_expiry(cfg: Config, expiry: str | None, public: bool) -> int:
-    """Resolve --expiry (human string or None) to seconds and validate the range.
-
-    This is the single home for expiry validation; downstream layers trust it.
-    """
-    if expiry is None:
-        secs = cfg.default_expiry
-    else:
-        try:
-            secs = cfgmod.parse_duration(expiry)
-        except ValueError as exc:
-            _fail(str(exc))
-    if not public and not (1 <= secs <= cfgmod.MAX_EXPIRY):
-        _fail("--expiry must be between 1s and 7d.")
-    return secs
-
-
-def _validate_name(name: str) -> None:
-    if not name or "/" in name or "\\" in name or name in (".", ".."):
-        _fail("--name must be a plain filename (no empty value, no slashes).")
-
-
-def _is_expired(expires_at: int | None, now: int | None = None) -> bool:
-    """True only for a presigned link whose deadline has passed."""
-    if expires_at is None:
-        return False
-    return expires_at <= (now if now is not None else int(time.time()))
-
-
-def _not_found_message(exc: Exception, bucket: str, key: str) -> str:
-    """Distinguish a genuine 404 from auth/network errors."""
-    from botocore.exceptions import ClientError
-
-    if isinstance(exc, ClientError):
-        code = exc.response.get("Error", {}).get("Code")
-        if code in ("404", "NoSuchKey", "NotFound"):
-            return f"object not found in {bucket}: {key}"
-        return f"could not access {key}: {exc}"
-    return f"could not access {key}: {exc}"
-
-
-def _make_link(client, cfg: Config, key: str, public: bool, expiry: int) -> str:
-    if public:
-        return links.public_url(cfg, key)
-    return links.presigned_url(client, cfg.bucket, key, expiry)
-
-
-def _publish(client, cfg: Config, key: str, size: int, public: bool, expiry: int) -> LinkResult:
-    """Build the link, log it locally, and return a typed result (one home for all three)."""
-    url = _make_link(client, cfg, key, public, expiry)
-    expires_at = None if public else int(time.time()) + expiry
-    link_type = "public" if public else "presigned"
-    db.record(
-        bucket=cfg.bucket,
-        key=key,
-        size=size,
-        link_type=link_type,
-        expires_at=expires_at,
-        url=url,
-    )
-    return LinkResult(key=key, size=size, url=url, link_type=link_type, expires_at=expires_at)
-
-
 @app.command()
 def up(
     paths: list[str] = typer.Argument(
@@ -510,7 +463,7 @@ def up(
     _require_public_base(cfg, public)
     expiry = _resolve_expiry(cfg, expiry, public)
 
-    sources = _resolve_sources(paths)
+    sources = upload.resolve_sources(paths)
     if not sources:
         _fail("no paths given.")
     # --name only makes sense when there's a single resulting object.
@@ -528,198 +481,15 @@ def up(
 
     uploaded: list[tuple[str, int]] = []
     for kind, src in sources:
-        eff_prefix = _effective_prefix(prefix, random_key)
+        eff_prefix = upload.effective_prefix(prefix, random_key)
         uploaded.extend(
-            _upload_source(
+            upload.upload_source(
                 client, cfg, kind, src, eff_prefix, name, zip_folder, extra, quiet, workers
             )
         )
 
     results = [_publish(client, cfg, key, size, public, expiry) for key, size in uploaded]
-    _render_results(results, public, expiry, quiet, json_out, copy, qr)
-
-
-def _resolve_sources(paths: list[str]):
-    """Validate inputs into (kind, value) pairs. kind: stdin | file | folder | folder_recursive."""
-    out = []
-    for raw in paths:
-        if raw == "-":
-            out.append(("stdin", None))
-            continue
-        p = Path(raw)
-        if not p.exists():
-            _fail(f"path does not exist: {raw}")
-        out.append(("file" if p.is_file() else "folder", p))
-    return out
-
-
-def _effective_prefix(prefix: str, random_key: bool) -> str:
-    if not random_key:
-        return prefix
-    token = util.random_token()
-    base = prefix.strip("/")
-    return f"{base}/{token}" if base else token
-
-
-def _upload_source(client, cfg, kind, src, eff_prefix, name, zip_folder, extra, quiet, workers):
-    """Upload one source, returning a list of (key, size)."""
-    if kind == "stdin":
-        if not name:
-            _fail("reading from stdin ('-') requires --name.")
-        tmp = Path(tempfile.mkdtemp(prefix="rink-")) / name
-        tmp.write_bytes(sys.stdin.buffer.read())
-        try:
-            key = uploader.build_key(eff_prefix, name)
-            return [_upload_one(client, cfg, tmp, key, extra, quiet)]
-        finally:
-            shutil.rmtree(tmp.parent, ignore_errors=True)
-
-    if kind == "file":
-        key = uploader.build_key(eff_prefix, name or src.name)
-        return [_upload_one(client, cfg, src, key, extra, quiet)]
-
-    # folder
-    if zip_folder:
-        return [_upload_zip(client, cfg, src, name, eff_prefix, extra, quiet)]
-    return _upload_recursive(client, cfg, src, eff_prefix, extra, quiet, workers)
-
-
-def _progress_bar():
-    return Progress(
-        TextColumn("[bold blue]{task.description}", justify="right"),
-        BarColumn(),
-        DownloadColumn(),
-        TransferSpeedColumn(),
-        console=console,
-    )
-
-
-def _upload_one(client, cfg, src: Path, key: str, extra, quiet) -> tuple[str, int]:
-    """Upload a single file (with a progress bar unless quiet). Returns (key, size)."""
-    size = src.stat().st_size
-    if quiet:
-        uploader.upload_file(client, cfg.bucket, src, key, extra=extra)
-    else:
-        with _progress_bar() as progress:
-            task = progress.add_task(src.name, total=size)
-            uploader.upload_file(
-                client,
-                cfg.bucket,
-                src,
-                key,
-                progress=lambda n: progress.update(task, advance=n),
-                extra=extra,
-            )
-    return key, size
-
-
-def _upload_zip(client, cfg, folder, name, eff_prefix, extra, quiet) -> tuple[str, int]:
-    if not quiet:
-        console.print(f"[dim]Zipping {folder}…[/]")
-    archive = uploader.zip_folder(folder)
-    try:
-        obj_name = name or archive.name
-        if not obj_name.endswith(".zip"):
-            obj_name += ".zip"
-        key = uploader.build_key(eff_prefix, obj_name)
-        return _upload_one(client, cfg, archive, key, extra, quiet)
-    finally:
-        shutil.rmtree(archive.parent, ignore_errors=True)
-
-
-def _upload_recursive(client, cfg, folder, eff_prefix, extra, quiet, workers) -> list[tuple[str, int]]:
-    files = list(uploader.iter_files(folder))
-    if not files:
-        _fail(f"No files found under {folder}.")
-    base_prefix = uploader.build_key(eff_prefix, folder.name)
-    total = sum(src.stat().st_size for src, _ in files)
-    out: list[tuple[str, int]] = []
-    failures: list[tuple[str, Exception]] = []
-
-    progress = None if quiet else _progress_bar()
-    # rich.Progress.update isn't documented thread-safe; the callback fires from
-    # every worker (and boto's internal multipart threads), so guard it.
-    lock = threading.Lock()
-
-    def do(src: Path, rel: str, advance) -> tuple[str, int]:
-        key = f"{base_prefix}/{rel}"
-        uploader.upload_file(client, cfg.bucket, src, key, progress=advance, extra=extra)
-        return key, src.stat().st_size
-
-    with (progress or nullcontext()):
-        task = progress.add_task(f"{folder.name}/", total=total) if progress else None
-
-        def advance(n, _task=task):
-            with lock:
-                progress.update(_task, advance=n)
-
-        cb = advance if progress else None
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-            futmap = {ex.submit(do, src, rel, cb): rel for src, rel in files}
-            for fut in as_completed(futmap):
-                rel = futmap[fut]
-                try:
-                    out.append(fut.result())
-                except Exception as exc:  # noqa: BLE001 - collect, don't abort the batch
-                    failures.append((f"{base_prefix}/{rel}", exc))
-
-    for key, exc in failures:
-        err.print(f"[red]failed[/] {key}: {exc}")
-    out.sort(key=lambda kv: kv[0])
-    return out
-
-
-def _summary(rows: list[tuple[str, int]]) -> None:
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("file")
-    table.add_column("size", justify="right")
-    for key, size in rows:
-        table.add_row(key, _human(size))
-    console.print(table)
-
-
-def _human(n: float) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
-        if n < 1024 or unit == "PB":
-            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
-        n /= 1024
-
-
-def _render_results(results: list[LinkResult], public, expiry, quiet, json_out, copy, qr) -> None:
-    """Render upload results respecting the output flags."""
-    if not results:
-        _fail("nothing was uploaded.")
-    urls = [r.url for r in results]
-
-    if json_out:
-        print(jsonlib.dumps([asdict(r) for r in results], indent=2))
-    elif quiet:
-        for u in urls:
-            print(u)
-    else:
-        _summary([(r.key, r.size) for r in results])
-        if len(results) == 1:
-            tail = "" if public else f" (expires in {_human_duration(expiry)})"
-            console.print(f"[dim]link{tail}:[/]")
-        else:
-            tail = "" if public else f" (expire in {_human_duration(expiry)})"
-            console.print(f"\n[bold]{len(results)} object(s) uploaded[/][dim]{tail}:[/]")
-        for u in urls:
-            print(u)
-        if qr:
-            if len(results) == 1:
-                art = util.render_qr(urls[0])
-                console.print(art if art else "[yellow](install segno for QR codes)[/]")
-            else:
-                console.print("[dim](--qr is shown for single uploads only)[/]")
-
-    if copy:
-        tool = util.copy_to_clipboard("\n".join(urls))
-        if tool and not quiet and not json_out:
-            console.print(f"[green]copied to clipboard[/] ({tool})")
-        elif not tool:
-            # Always warn (to stderr) — the user explicitly asked to copy.
-            err.print("[yellow]no clipboard tool found (install wl-copy/xclip/pbcopy)[/]")
+    render_results(results, public, expiry, quiet, json_out, copy, qr)
 
 
 def main() -> None:
@@ -727,7 +497,7 @@ def main() -> None:
         app()
     except KeyboardInterrupt:
         err.print("\nInterrupted.")
-        sys.exit(130)
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":
