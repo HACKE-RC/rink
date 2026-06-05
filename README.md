@@ -14,9 +14,9 @@ Cloudflare R2 objects are private by default, so `rink` provides two ways to sha
 
 ## Demo
 
-<video src="https://pub-4ea8c8f3f3f74c32bdfdf9bf08d87d3c.r2.dev/assets/ttyl-recording.mp4" controls width="100%"></video>
+[![rink demo](assets/rink-demo.gif)](https://pub-4ea8c8f3f3f74c32bdfdf9bf08d87d3c.r2.dev/assets/ttyl-recording.mp4)
 
-[Open the demo video](https://pub-4ea8c8f3f3f74c32bdfdf9bf08d87d3c.r2.dev/assets/ttyl-recording.mp4)
+[Open the full demo video](https://pub-4ea8c8f3f3f74c32bdfdf9bf08d87d3c.r2.dev/assets/ttyl-recording.mp4)
 
 ---
 
