@@ -16,5 +16,6 @@ This Worker turns an R2 bucket into a small receive-link service for `rink serve
 3. Create receive links with `rink serve`.
 
 The public receive page accepts browser uploads with raw streamed `PUT` requests.
+It issues an HttpOnly browser pin cookie and commits it on the first upload.
 Each uploaded file gets a Worker download URL. By default each download URL is
 one-time use and the Durable Object tracks view counts.

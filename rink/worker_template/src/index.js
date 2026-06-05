@@ -5,6 +5,7 @@ const HTML_HEADERS = {
   "Cache-Control": "no-store, max-age=0",
   "Content-Type": "text/html; charset=utf-8",
 };
+const PIN_COOKIE_NAME = "rink_pin";
 
 export class RinkLinks extends DurableObject {
   constructor(ctx, env) {
@@ -19,13 +20,18 @@ export class RinkLinks extends DurableObject {
           expires_at INTEGER NOT NULL,
           max_uploads INTEGER NOT NULL,
           max_bytes INTEGER NOT NULL,
-          max_download_views INTEGER NOT NULL
+          max_download_views INTEGER NOT NULL,
+          pin_token_hash TEXT
         );
         CREATE TABLE IF NOT EXISTS reservations (
           id TEXT PRIMARY KEY,
           file_id TEXT NOT NULL,
           key TEXT NOT NULL,
           filename TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS pin_candidates (
+          token_hash TEXT PRIMARY KEY,
           created_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS files (
@@ -40,6 +46,10 @@ export class RinkLinks extends DurableObject {
           max_views INTEGER NOT NULL
         );
       `);
+      const dropColumns = this.ctx.storage.sql.exec("PRAGMA table_info(drops)").toArray();
+      if (!dropColumns.some((column) => column.name === "pin_token_hash")) {
+        this.ctx.storage.sql.exec("ALTER TABLE drops ADD COLUMN pin_token_hash TEXT");
+      }
     });
   }
 
@@ -69,6 +79,37 @@ export class RinkLinks extends DurableObject {
     if (!drop) {
       return null;
     }
+    return this.publicDropState(drop);
+  }
+
+  async issuePin(input) {
+    const drop = this.getDropRow();
+    if (!drop) {
+      return { ok: false, status: 404, error: "receive link not found" };
+    }
+    const now = Date.now();
+    this.clearExpiredReservations(now);
+    if (now > drop.expires_at || this.uploadSlotsUsed() >= drop.max_uploads) {
+      return { ok: false, status: 410, error: "receive link expired or used" };
+    }
+    if (drop.pin_token_hash && !(await verifyToken(input.token, drop.pin_token_hash))) {
+      return { ok: false, status: 403, error: "receive link is pinned to another browser" };
+    }
+    if (!drop.pin_token_hash) {
+      this.ctx.storage.sql.exec(
+        "INSERT OR IGNORE INTO pin_candidates (token_hash, created_at) VALUES (?, ?)",
+        input.tokenHash,
+        now,
+      );
+    }
+    return {
+      ok: true,
+      setCookie: true,
+      drop: this.publicDropState(drop),
+    };
+  }
+
+  publicDropState(drop) {
     return {
       ...this.publicDrop(drop),
       files: this.listFiles(),
@@ -87,6 +128,10 @@ export class RinkLinks extends DurableObject {
     }
     if (input.size > drop.max_bytes) {
       return { ok: false, status: 413, error: "file is larger than this link allows" };
+    }
+    const pinCheck = await this.checkPin(drop, input.pinToken);
+    if (!pinCheck.ok) {
+      return pinCheck;
     }
     this.clearExpiredReservations(now);
     if (this.uploadSlotsUsed() >= drop.max_uploads) {
@@ -119,6 +164,32 @@ export class RinkLinks extends DurableObject {
       downloadTokenHash: tokenHash,
       maxViews: drop.max_download_views,
     };
+  }
+
+  async checkPin(drop, token) {
+    if (!token) {
+      return { ok: false, status: 403, error: "open the receive link before uploading" };
+    }
+    if (!drop.pin_token_hash) {
+      const tokenHash = await sha256Hex(token);
+      const candidate = this.ctx.storage.sql
+        .exec("SELECT 1 FROM pin_candidates WHERE token_hash = ?", tokenHash)
+        .toArray()[0];
+      if (!candidate) {
+        return { ok: false, status: 403, error: "open the receive link before uploading" };
+      }
+      this.ctx.storage.sql.exec(
+        "UPDATE drops SET pin_token_hash = ? WHERE id = ?",
+        tokenHash,
+        drop.id,
+      );
+      this.ctx.storage.sql.exec("DELETE FROM pin_candidates WHERE token_hash != ?", tokenHash);
+      return { ok: true };
+    }
+    if (!(await verifyToken(token, drop.pin_token_hash))) {
+      return { ok: false, status: 403, error: "receive link is pinned to another browser" };
+    }
+    return { ok: true };
   }
 
   async completeUpload(input) {
@@ -250,7 +321,7 @@ export default {
         return await dropStatus(request, env, route.dropId);
       }
       if (route.kind === "receive-page") {
-        return await receivePage(env, url, route.dropId);
+        return await receivePage(request, env, url, route.dropId);
       }
       if (route.kind === "upload") {
         return await uploadFile(request, env, url, route.dropId, route.filename);
@@ -339,21 +410,31 @@ async function dropStatus(request, env, dropId) {
   return drop ? json(drop) : json({ error: "not found" }, 404);
 }
 
-async function receivePage(env, url, dropId) {
-  const drop = await env.RINK_LINKS.getByName(dropId).getDrop();
-  if (!drop) {
+async function receivePage(request, env, url, dropId) {
+  const pinToken = readCookie(request, PIN_COOKIE_NAME) || randomToken(32);
+  const pinned = await env.RINK_LINKS.getByName(dropId).issuePin({
+    token: pinToken,
+    tokenHash: await sha256Hex(pinToken),
+  });
+  if (!pinned.ok) {
+    const title = pinned.status === 404 ? "Receive link not found" : "Receive link closed";
     return html(
-      renderMessagePage("Receive link not found", "This upload link does not exist."),
-      404,
+      renderMessagePage(title, pinned.error),
+      pinned.status,
     );
   }
+  const drop = pinned.drop;
   if (!drop.active) {
     return html(
       renderMessagePage("Receive link closed", "This upload link is expired or used."),
       410,
     );
   }
-  return html(renderUploadPage(drop, `${url.origin}/r/${dropId}`));
+  const response = html(renderUploadPage(drop, `${url.origin}/r/${dropId}`));
+  if (pinned.setCookie) {
+    response.headers.append("Set-Cookie", pinCookie(url, dropId, pinToken, drop.expiresAt));
+  }
+  return response;
 }
 
 async function uploadFile(request, env, url, dropId, filename) {
@@ -367,7 +448,12 @@ async function uploadFile(request, env, url, dropId, filename) {
   const size = Number(contentLength);
   const contentType = request.headers.get("Content-Type") ?? "application/octet-stream";
   const stub = env.RINK_LINKS.getByName(dropId);
-  const reservation = await stub.reserveUpload({ filename, size, contentType });
+  const reservation = await stub.reserveUpload({
+    filename,
+    size,
+    contentType,
+    pinToken: readCookie(request, PIN_COOKIE_NAME),
+  });
   if (!reservation.ok) {
     return json({ error: reservation.error }, reservation.status);
   }
@@ -456,6 +542,30 @@ function corsHeaders() {
     "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
     "Access-Control-Allow-Origin": "*",
   };
+}
+
+function pinCookie(url, dropId, token, expiresAt) {
+  const maxAge = Math.max(1, Math.ceil((expiresAt - Date.now()) / 1000));
+  const secure = url.protocol === "https:" ? "; Secure" : "";
+  return [
+    `${PIN_COOKIE_NAME}=${token}`,
+    `Path=/r/${dropId}`,
+    `Max-Age=${maxAge}`,
+    "HttpOnly",
+    "SameSite=Strict",
+  ].join("; ") + secure;
+}
+
+function readCookie(request, name) {
+  const header = request.headers.get("Cookie") ?? "";
+  const prefix = `${name}=`;
+  for (const segment of header.split(";")) {
+    const part = segment.trim();
+    if (part.startsWith(prefix)) {
+      return part.slice(prefix.length) || null;
+    }
+  }
+  return null;
 }
 
 function numberSetting(value, fallback, defaultValue) {
@@ -664,6 +774,7 @@ function renderUploadPage(drop, endpoint) {
     overflow-wrap: anywhere;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: .9rem;
+    user-select: text;
   }
   .copy-pill {
     flex: 0 0 auto;

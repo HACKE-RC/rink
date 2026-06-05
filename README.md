@@ -12,6 +12,14 @@ Cloudflare R2 objects are private by default, so `rink` provides two ways to sha
 
 ---
 
+## Demo
+
+<video src="https://pub-4ea8c8f3f3f74c32bdfdf9bf08d87d3c.r2.dev/assets/ttyl-recording.mp4" controls width="100%"></video>
+
+[Open the demo video](https://pub-4ea8c8f3f3f74c32bdfdf9bf08d87d3c.r2.dev/assets/ttyl-recording.mp4)
+
+---
+
 ## Features
 
 - **Direct Uploads**: Single files, multiple files, folders, or piped input from standard input (`stdin`).
@@ -213,8 +221,9 @@ rink serve --max-uploads 3
 
 Each received file gets a Worker download URL. By default those download URLs
 are one-time links (`--download-views 1`), and the Worker Durable Object tracks
-view counts. The receive page shows browser upload progress and offers a direct
-copy button for the generated download link.
+view counts. The receive page issues an HttpOnly browser pin cookie, commits it
+on the first upload, then shows browser upload progress and offers a direct copy
+button for the generated download link.
 
 ### Deleting & Revoking Access (`rink rm`, `rink prune`)
 To revoke access to a file, you must delete it from the bucket.

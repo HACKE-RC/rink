@@ -193,6 +193,25 @@ def test_worker_template_upload_page_has_progress_and_copy_controls():
     assert "fallbackCopy" in source
 
 
+def test_worker_template_pins_uploads_to_http_only_cookie():
+    source = Path("rink/worker_template/src/index.js").read_text()
+
+    assert "pin_token_hash TEXT" in source
+    assert "CREATE TABLE IF NOT EXISTS pin_candidates" in source
+    assert "ALTER TABLE drops ADD COLUMN pin_token_hash TEXT" in source
+    assert "async issuePin" in source
+    assert "async checkPin" in source
+    assert "INSERT OR IGNORE INTO pin_candidates" in source
+    assert "SELECT 1 FROM pin_candidates WHERE token_hash = ?" in source
+    assert 'const PIN_COOKIE_NAME = "rink_pin"' in source
+    assert 'response.headers.append("Set-Cookie"' in source
+    assert "HttpOnly" in source
+    assert "SameSite=Strict" in source
+    assert "pinToken: readCookie(request, PIN_COOKIE_NAME)" in source
+    assert "open the receive link before uploading" in source
+    assert "receive link is pinned to another browser" in source
+
+
 @pytest.mark.parametrize(
     "n,expected",
     [(0, "0B"), (512, "512B"), (1024, "1.0KB"), (1536, "1.5KB"),
