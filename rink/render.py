@@ -9,6 +9,7 @@ from __future__ import annotations
 import json as jsonlib
 import time
 from dataclasses import asdict, dataclass
+from typing import Literal
 
 import typer
 from rich.console import Console
@@ -25,6 +26,22 @@ from . import util
 
 console = Console()
 err = Console(stderr=True)
+
+ProgressPhase = Literal["upload", "zip"]
+ProgressOutcome = Literal["active", "success", "failure"]
+
+_PROGRESS_LABELS = {
+    "upload": {
+        "active": "Uploading",
+        "success": "✅ Uploaded",
+        "failure": "❌ Upload failed",
+    },
+    "zip": {
+        "active": "Zipping",
+        "success": "✅ Zipped",
+        "failure": "❌ Zip failed",
+    },
+}
 
 
 def _fail(message: str, hint: str | None = None) -> None:
@@ -91,6 +108,26 @@ def progress_bar() -> Progress:
         TransferSpeedColumn(),
         console=console,
     )
+
+
+def progress_description(
+    phase: ProgressPhase, target: str, outcome: ProgressOutcome = "active"
+) -> str:
+    return f"{_PROGRESS_LABELS[phase][outcome]} {target}"
+
+
+def finish_progress_task(
+    progress: Progress, task, phase: ProgressPhase, target: str, total: int
+) -> None:
+    progress.update(
+        task,
+        completed=total,
+        description=progress_description(phase, target, "success"),
+    )
+
+
+def fail_progress_task(progress: Progress, task, phase: ProgressPhase, target: str) -> None:
+    progress.update(task, description=progress_description(phase, target, "failure"))
 
 
 def _summary(rows: list[tuple[str, int]]) -> None:

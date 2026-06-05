@@ -2,7 +2,7 @@
 
 import pytest
 
-from rink import cli, links, upload, uploader, util
+from rink import cli, links, render, upload, uploader, util
 from rink.config import Config, ConfigError, parse_duration
 
 
@@ -83,7 +83,6 @@ def test_is_expired():
 
 class ProgressSpy:
     def __init__(self):
-        self.descriptions = []
         self.current = {}
 
     def __enter__(self):
@@ -93,8 +92,7 @@ class ProgressSpy:
         return False
 
     def add_task(self, description, total):
-        self.descriptions.append(description)
-        task = len(self.descriptions)
+        task = len(self.current) + 1
         self.current[task] = {"description": description, "completed": 0, "total": total}
         return task
 
@@ -107,97 +105,141 @@ class ProgressSpy:
             self.current[task]["description"] = description
 
 
-def test_upload_one_progress_says_uploading(tmp_path, monkeypatch):
-    f = tmp_path / "a.txt"
-    f.write_text("hello")
-    cfg = Config("acct", "ak", "sk", "bucket")
-    spy = ProgressSpy()
-
-    monkeypatch.setattr(upload, "progress_bar", lambda: spy)
-    monkeypatch.setattr(
-        uploader,
-        "upload_file",
-        lambda client, bucket, src, key, progress=None, extra=None: progress
-        and progress(src.stat().st_size),
-    )
-
-    assert upload._upload_one(None, cfg, f, "a.txt", extra=None, quiet=False) == ("a.txt", 5)
-    assert spy.descriptions == ["Uploading a.txt"]
-    assert spy.current[1] == {"description": "✅ Uploaded a.txt", "completed": 5, "total": 5}
-
-
-def test_recursive_progress_says_uploading_folder(tmp_path, monkeypatch):
-    d = tmp_path / "d"
-    d.mkdir()
-    (d / "a.txt").write_text("hello")
-    cfg = Config("acct", "ak", "sk", "bucket")
-    spy = ProgressSpy()
-
-    monkeypatch.setattr(upload, "progress_bar", lambda: spy)
-    monkeypatch.setattr(
-        uploader,
-        "upload_file",
-        lambda client, bucket, src, key, progress=None, extra=None: progress
-        and progress(src.stat().st_size),
-    )
-
-    assert upload.upload_recursive(None, cfg, d, "", extra=None, quiet=False, workers=1) == [
-        ("d/a.txt", 5)
-    ]
-    assert spy.descriptions == ["Uploading d/"]
-    assert spy.current[1] == {"description": "✅ Uploaded d/", "completed": 5, "total": 5}
-
-
-def test_recursive_progress_marks_failed_upload(tmp_path, monkeypatch):
-    d = tmp_path / "d"
-    d.mkdir()
-    (d / "a.txt").write_text("hello")
-    cfg = Config("acct", "ak", "sk", "bucket")
-    spy = ProgressSpy()
-
-    monkeypatch.setattr(upload, "progress_bar", lambda: spy)
-
-    def fail_upload(client, bucket, src, key, progress=None, extra=None):
-        if progress:
-            progress(src.stat().st_size)
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(uploader, "upload_file", fail_upload)
-
-    assert upload.upload_recursive(None, cfg, d, "", extra=None, quiet=False, workers=1) == []
-    assert spy.descriptions == ["Uploading d/"]
-    assert spy.current[1] == {
-        "description": "❌ Upload failed d/",
-        "completed": 5,
-        "total": 5,
-    }
-
-
-def test_zip_progress_says_zipped_then_uploaded(tmp_path, monkeypatch):
-    d = tmp_path / "d"
-    d.mkdir()
-    (d / "a.txt").write_text("hello")
-    cfg = Config("acct", "ak", "sk", "bucket")
+def _progress_spies(monkeypatch):
     spies = []
 
-    def progress_factory():
+    def factory():
         spy = ProgressSpy()
         spies.append(spy)
         return spy
 
-    monkeypatch.setattr(upload, "progress_bar", progress_factory)
-    monkeypatch.setattr(
-        uploader,
-        "upload_file",
-        lambda client, bucket, src, key, progress=None, extra=None: progress
-        and progress(src.stat().st_size),
-    )
+    monkeypatch.setattr(upload, "progress_bar", factory)
+    return spies
 
-    key, size = upload._upload_zip(None, cfg, d, None, "", extra=None, quiet=False)
+
+def _cfg():
+    return Config("acct", "ak", "sk", "bucket")
+
+
+def _sample_file(tmp_path):
+    f = tmp_path / "a.txt"
+    f.write_text("hello")
+    return f
+
+
+def _sample_dir(tmp_path):
+    d = tmp_path / "d"
+    d.mkdir()
+    (d / "a.txt").write_text("hello")
+    return d
+
+
+def _task(description, completed, total=5):
+    return {"description": description, "completed": completed, "total": total}
+
+
+def _successful_upload(client, bucket, src, key, progress=None, extra=None):
+    if progress:
+        progress(src.stat().st_size)
+
+
+def _failing_upload(advance=0):
+    def upload_file(client, bucket, src, key, progress=None, extra=None):
+        if progress and advance:
+            progress(advance)
+        raise RuntimeError("boom")
+
+    return upload_file
+
+
+@pytest.mark.parametrize(
+    "phase,target,outcome,expected",
+    [
+        ("upload", "a.txt", "active", "Uploading a.txt"),
+        ("upload", "a.txt", "success", "✅ Uploaded a.txt"),
+        ("upload", "a.txt", "failure", "❌ Upload failed a.txt"),
+        ("zip", "d/", "active", "Zipping d/"),
+        ("zip", "d/", "success", "✅ Zipped d/"),
+        ("zip", "d/", "failure", "❌ Zip failed d/"),
+    ],
+)
+def test_progress_description(phase, target, outcome, expected):
+    assert render.progress_description(phase, target, outcome) == expected
+
+
+def test_upload_one_finalizes_success(tmp_path, monkeypatch):
+    f = _sample_file(tmp_path)
+    spies = _progress_spies(monkeypatch)
+
+    monkeypatch.setattr(uploader, "upload_file", _successful_upload)
+
+    assert upload._upload_one(None, _cfg(), f, "a.txt", extra=None, quiet=False) == (
+        "a.txt",
+        5,
+    )
+    assert spies[0].current[1] == _task("✅ Uploaded a.txt", 5)
+
+
+def test_upload_one_finalizes_failure_without_forcing_complete(tmp_path, monkeypatch):
+    f = _sample_file(tmp_path)
+    spies = _progress_spies(monkeypatch)
+
+    monkeypatch.setattr(uploader, "upload_file", _failing_upload(advance=2))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        upload._upload_one(None, _cfg(), f, "a.txt", extra=None, quiet=False)
+
+    assert spies[0].current[1] == _task("❌ Upload failed a.txt", 2)
+
+
+def test_recursive_progress_finalizes_success(tmp_path, monkeypatch):
+    d = _sample_dir(tmp_path)
+    spies = _progress_spies(monkeypatch)
+
+    monkeypatch.setattr(uploader, "upload_file", _successful_upload)
+
+    assert upload.upload_recursive(None, _cfg(), d, "", extra=None, quiet=False, workers=1) == [
+        ("d/a.txt", 5)
+    ]
+    assert spies[0].current[1] == _task("✅ Uploaded d/", 5)
+
+
+def test_recursive_progress_finalizes_failure_without_forcing_complete(tmp_path, monkeypatch):
+    d = _sample_dir(tmp_path)
+    spies = _progress_spies(monkeypatch)
+
+    monkeypatch.setattr(uploader, "upload_file", _failing_upload(advance=2))
+
+    assert upload.upload_recursive(None, _cfg(), d, "", extra=None, quiet=False, workers=1) == []
+    assert spies[0].current[1] == _task("❌ Upload failed d/", 2)
+
+
+def test_zip_progress_says_zipped_then_uploaded(tmp_path, monkeypatch):
+    d = _sample_dir(tmp_path)
+    spies = _progress_spies(monkeypatch)
+
+    monkeypatch.setattr(uploader, "upload_file", _successful_upload)
+
+    key, size = upload._upload_zip(None, _cfg(), d, None, "", extra=None, quiet=False)
 
     assert key == "d.zip"
     assert size > 0
-    assert spies[0].descriptions == ["Zipping d/"]
-    assert spies[0].current[1] == {"description": "✅ Zipped d/", "completed": 5, "total": 5}
-    assert spies[1].descriptions == ["Uploading d.zip"]
+    assert spies[0].current[1] == _task("✅ Zipped d/", 5)
     assert spies[1].current[1]["description"] == "✅ Uploaded d.zip"
+
+
+def test_zip_progress_finalizes_failure_without_forcing_complete(tmp_path, monkeypatch):
+    d = _sample_dir(tmp_path)
+    spies = _progress_spies(monkeypatch)
+
+    def fail_zip(folder, progress=None):
+        if progress:
+            progress(2)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(uploader, "zip_folder", fail_zip)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        upload._upload_zip(None, _cfg(), d, None, "", extra=None, quiet=False)
+
+    assert spies[0].current[1] == _task("❌ Zip failed d/", 2)
