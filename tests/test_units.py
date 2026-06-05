@@ -1,8 +1,11 @@
 """Pure-function tests (no network)."""
 
+import json
+from pathlib import Path
+
 import pytest
 
-from rink import cli, links, render, upload, uploader, util
+from rink import cli, links, render, serve, upload, uploader, util
 from rink.config import Config, ConfigError, parse_duration
 
 
@@ -55,6 +58,139 @@ def test_random_token():
     t = util.random_token(4)
     assert len(t) == 8
     assert all(c in "0123456789abcdef" for c in t)
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [("10", 10), ("10b", 10), ("2KB", 2048), ("3mb", 3 * 1024**2), ("1GB", 1024**3)],
+)
+def test_parse_size_ok(text, expected):
+    assert serve.parse_size(text) == expected
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "1tb", "mb", "1.5MB"])
+def test_parse_size_bad(bad):
+    with pytest.raises(ValueError):
+        serve.parse_size(bad)
+
+
+def test_normalize_prefix_random(monkeypatch):
+    monkeypatch.setattr(util, "random_token", lambda: "abc123")
+    assert serve.normalize_prefix("/inbox//files/", False) == "inbox/files"
+    assert serve.normalize_prefix("inbox", True) == "inbox/abc123"
+
+
+def test_parse_deploy_url_from_wrangler_output():
+    output = "Uploaded rink-serve\nhttps://rink-serve.example.workers.dev\n"
+    assert serve.parse_deploy_url(output) == "https://rink-serve.example.workers.dev"
+
+
+def test_parse_deploy_url_missing():
+    assert serve.parse_deploy_url("Deployed rink-serve without a URL") is None
+
+
+def test_read_worker_token(tmp_path):
+    worker_dir = tmp_path / "worker"
+    worker_dir.mkdir()
+    (worker_dir / ".dev.vars").write_text(
+        "# local only\nRINK_SERVE_ADMIN_TOKEN='local-token'\n"
+    )
+    assert serve.read_worker_token(worker_dir) == "local-token"
+
+
+def test_create_receive_link_uses_rink_user_agent(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "id": "drop1",
+                    "uploadUrl": "https://serve.example/r/drop1",
+                    "expiresAt": 1,
+                    "maxUploads": 1,
+                    "maxBytes": 1024,
+                    "maxDownloadViews": 1,
+                    "prefix": "inbox",
+                }
+            ).encode()
+
+    def fake_urlopen(req, timeout):
+        captured["headers"] = {k.lower(): v for k, v in req.header_items()}
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(serve.urllib.request, "urlopen", fake_urlopen)
+
+    result = serve.create_receive_link(
+        "https://serve.example",
+        "tok",
+        prefix="inbox",
+        label=None,
+        ttl_seconds=3600,
+        max_uploads=1,
+        max_bytes=1024,
+        max_download_views=1,
+    )
+
+    assert result.upload_url == "https://serve.example/r/drop1"
+    assert captured["headers"]["user-agent"].startswith("rink/")
+    assert captured["headers"]["accept"] == "application/json"
+    assert captured["headers"]["authorization"] == "Bearer tok"
+    assert captured["timeout"] == 30
+
+
+def test_put_worker_secret_pipes_token(monkeypatch, tmp_path):
+    calls = []
+
+    class FakeProcess:
+        returncode = 0
+        stdout = "Uploaded secret\n"
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeProcess()
+
+    monkeypatch.setattr(serve.shutil, "which", lambda name: "/usr/bin/npx")
+    monkeypatch.setattr(serve.subprocess, "run", fake_run)
+
+    assert serve.put_worker_secret(tmp_path, "secret-token") == "Uploaded secret\n"
+
+    args, kwargs = calls[0]
+    assert args == [
+        "npx",
+        "wrangler",
+        "secret",
+        "put",
+        "RINK_SERVE_ADMIN_TOKEN",
+        "--config",
+        "wrangler.jsonc",
+    ]
+    assert kwargs["cwd"] == tmp_path
+    assert kwargs["input"] == "secret-token\n"
+    assert "secret-token" not in args
+
+
+def test_worker_template_upload_page_has_progress_and_copy_controls():
+    source = Path("rink/worker_template/src/index.js").read_text()
+
+    assert '"Cache-Control": "no-store, max-age=0"' in source
+    assert "new XMLHttpRequest()" in source
+    assert "xhr.upload.onprogress" in source
+    assert "navigator.clipboard.writeText" in source
+    assert 'id="copy-link"' in source
+    assert 'id="download-link"' in source
+    assert 'id="download-url"' in source
+    assert 'aria-live="polite"' in source
+    assert "copyDownloadLink" in source
+    assert "Click the link to copy it." in source
+    assert "fallbackCopy" in source
 
 
 @pytest.mark.parametrize(

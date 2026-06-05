@@ -33,6 +33,8 @@ _ENV_OVERRIDES = {
     "secret_access_key": "RINK_SECRET_ACCESS_KEY",
     "bucket": "RINK_BUCKET",
     "public_base_url": "RINK_PUBLIC_BASE_URL",
+    "serve_url": "RINK_SERVE_URL",
+    "serve_token": "RINK_SERVE_TOKEN",
 }
 
 
@@ -72,6 +74,8 @@ class Config:
     bucket: str
     public_base_url: str | None = None
     default_expiry: int = DEFAULT_EXPIRY
+    serve_url: str | None = None
+    serve_token: str | None = None
 
     @property
     def endpoint(self) -> str:
@@ -129,6 +133,8 @@ def load_config() -> Config:
         bucket=data["bucket"],
         public_base_url=data.get("public_base_url") or None,
         default_expiry=int(data.get("default_expiry", DEFAULT_EXPIRY)),
+        serve_url=data.get("serve_url") or None,
+        serve_token=data.get("serve_token") or None,
     )
 
 
@@ -149,6 +155,10 @@ def save_config(cfg: Config) -> Path:
     ]
     if cfg.public_base_url:
         lines.append(f'public_base_url = "{_toml_escape(cfg.public_base_url)}"')
+    if cfg.serve_url:
+        lines.append(f'serve_url = "{_toml_escape(cfg.serve_url)}"')
+    if cfg.serve_token:
+        lines.append(f'serve_token = "{_toml_escape(cfg.serve_token)}"')
 
     CONFIG_PATH.write_text("\n".join(lines) + "\n")
     CONFIG_PATH.chmod(0o600)

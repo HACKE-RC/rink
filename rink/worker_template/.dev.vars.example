@@ -1,0 +1,4 @@
+# Copy to .dev.vars for local development.
+# Store production secrets with:
+#   npx wrangler secret put RINK_SERVE_ADMIN_TOKEN --config wrangler.jsonc
+RINK_SERVE_ADMIN_TOKEN=replace-with-a-long-random-token

@@ -1,0 +1,37 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "rink-serve",
+  "main": "src/index.js",
+  "compatibility_date": "2026-06-05",
+  "compatibility_flags": ["nodejs_compat"],
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "__RINK_BUCKET__"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RINK_LINKS",
+        "class_name": "RinkLinks"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RinkLinks"]
+    }
+  ],
+  "vars": {
+    "OBJECT_PREFIX": "rink-inbox",
+    "DEFAULT_TTL_SECONDS": "86400",
+    "DEFAULT_MAX_UPLOAD_BYTES": "536870912",
+    "DEFAULT_MAX_UPLOADS": "1",
+    "DEFAULT_MAX_DOWNLOAD_VIEWS": "1"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

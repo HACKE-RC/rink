@@ -20,6 +20,7 @@ Cloudflare R2 objects are private by default, so `rink` provides two ways to sha
 - **Track Expirations**: Uses a lightweight local SQLite database to track presigned URLs and their remaining lifespan.
 - **Multipart Uploads**: Automatically switches to multipart uploads for files ≥ 8 MiB with smooth progress bars.
 - **Self-Cleaning**: Easily list expired links and prune them from R2 to keep your storage clean.
+- **Receive Links**: `rink serve` can create file-drop links backed by a tiny Cloudflare Worker in front of your bucket.
 
 ---
 
@@ -91,6 +92,8 @@ You can also use environment variables to configure `rink` or override config fi
 - `RINK_SECRET_ACCESS_KEY`
 - `RINK_BUCKET`
 - `RINK_PUBLIC_BASE_URL`
+- `RINK_SERVE_URL`
+- `RINK_SERVE_TOKEN`
 
 ---
 
@@ -174,6 +177,44 @@ rink link invoice.pdf --expiry 7d -c
 # Open an uploaded file's URL in your default web browser
 rink open invoice.pdf
 ```
+
+### Receiving Files (`rink serve`)
+`rink serve` inverts the normal upload flow. You deploy a small Worker in front
+of your R2 bucket, then generate a receive link and send it to someone else.
+They upload through the browser page; the Worker streams the file into your R2
+bucket without exposing your R2 credentials.
+
+First scaffold and deploy the Worker:
+
+```bash
+# Write a deployable Worker project bound to your configured R2 bucket
+rink serve --init --worker-dir rink-serve-worker
+
+# Deploy, sync the Worker secret, and save the Worker URL/token into rink config
+rink serve --deploy --worker-dir rink-serve-worker
+```
+
+`rink serve --deploy` uploads the local admin token as the Worker secret, parses
+Wrangler's deployed `workers.dev` URL, and saves both values. If Wrangler does
+not print a URL, rink asks for it.
+
+Create a receive link:
+
+```bash
+# One file, expires in 1 day, 512 MiB max file size
+rink serve
+
+# More control
+rink serve --label "Send me the signed PDF" --expiry 2h --max-size 50MB --prefix inbox/contracts -c
+
+# Let the link accept three uploads
+rink serve --max-uploads 3
+```
+
+Each received file gets a Worker download URL. By default those download URLs
+are one-time links (`--download-views 1`), and the Worker Durable Object tracks
+view counts. The receive page shows browser upload progress and offers a direct
+copy button for the generated download link.
 
 ### Deleting & Revoking Access (`rink rm`, `rink prune`)
 To revoke access to a file, you must delete it from the bucket.

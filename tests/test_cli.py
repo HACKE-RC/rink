@@ -9,7 +9,7 @@ from botocore.config import Config as BotoConfig
 from moto import mock_aws
 from typer.testing import CliRunner
 
-from rink import cli, config as cfgmod, db, uploader
+from rink import cli, config as cfgmod, db, serve as serve_mod, uploader
 
 runner = CliRunner()
 
@@ -17,6 +17,7 @@ runner = CliRunner()
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     # Isolate config: no real file, credentials via env.
+    monkeypatch.setattr(cfgmod, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(cfgmod, "CONFIG_PATH", tmp_path / "nope.toml")
     monkeypatch.setenv("RINK_ACCOUNT_ID", "acct")
     monkeypatch.setenv("RINK_ACCESS_KEY_ID", "ak")
@@ -132,3 +133,221 @@ def test_stdin_upload(env):
     r = runner.invoke(cli.app, ["up", "-", "--name", "piped.txt", "--quiet"], input="from stdin")
     assert r.exit_code == 0 and "X-Amz-Signature" in r.stdout
     assert "piped.txt" in db.records_for("test")
+
+
+def test_serve_init_writes_worker_template(env, tmp_path):
+    worker_dir = tmp_path / "worker"
+
+    r = runner.invoke(cli.app, ["serve", "--init", "--worker-dir", str(worker_dir)])
+
+    assert r.exit_code == 0
+    assert (worker_dir / "wrangler.jsonc").exists()
+    assert (worker_dir / "src" / "index.js").exists()
+    assert (worker_dir / ".dev.vars").exists()
+    assert not (worker_dir / "__init__.py").exists()
+    assert ".dev.vars" in (worker_dir / ".gitignore").read_text()
+    assert "replace-with" in (worker_dir / ".dev.vars.example").read_text()
+    assert '"bucket_name": "test"' in (worker_dir / "wrangler.jsonc").read_text()
+    assert "RINK_SERVE_TOKEN" in r.stdout
+
+
+def test_serve_init_deploy_saves_worker_config(env, tmp_path, monkeypatch):
+    worker_dir = tmp_path / "worker"
+    worker_url = "https://rink-serve.example.workers.dev"
+    synced = []
+
+    monkeypatch.setattr(serve_mod, "new_admin_token", lambda: "generated-token")
+    monkeypatch.setattr(
+        serve_mod,
+        "deploy_worker",
+        lambda path: serve_mod.DeployResult(
+            output=f"Deployed {worker_url}\n",
+            worker_url=worker_url,
+        ),
+    )
+    monkeypatch.setattr(
+        serve_mod,
+        "put_worker_secret",
+        lambda path, token: synced.append((path, token)) or "Uploaded secret\n",
+    )
+
+    r = runner.invoke(
+        cli.app,
+        ["serve", "--init", "--deploy", "--worker-dir", str(worker_dir)],
+    )
+
+    assert r.exit_code == 0, r.output
+    raw = cfgmod.read_raw()
+    assert raw["serve_url"] == worker_url
+    assert raw["serve_token"] == "generated-token"
+    assert synced == [(worker_dir, "generated-token")]
+    assert "saved Serve config" in r.stdout
+
+
+def test_serve_deploy_saves_url_and_token_from_dev_vars(env, tmp_path, monkeypatch):
+    worker_dir = tmp_path / "worker"
+    worker_dir.mkdir()
+    (worker_dir / ".dev.vars").write_text("RINK_SERVE_ADMIN_TOKEN=local-token\n")
+    worker_url = "https://rink-serve.example.workers.dev"
+    synced = []
+
+    monkeypatch.setattr(
+        serve_mod,
+        "deploy_worker",
+        lambda path: serve_mod.DeployResult(
+            output=f"Deployed {worker_url}\n",
+            worker_url=worker_url,
+        ),
+    )
+    monkeypatch.setattr(
+        serve_mod,
+        "put_worker_secret",
+        lambda path, token: synced.append((path, token)) or "Uploaded secret\n",
+    )
+
+    r = runner.invoke(cli.app, ["serve", "--deploy", "--worker-dir", str(worker_dir)])
+
+    assert r.exit_code == 0, r.output
+    raw = cfgmod.read_raw()
+    assert raw["serve_url"] == worker_url
+    assert raw["serve_token"] == "local-token"
+    assert synced == [(worker_dir, "local-token")]
+
+
+def test_serve_deploy_prompts_when_wrangler_url_is_missing(env, tmp_path, monkeypatch):
+    worker_dir = tmp_path / "worker"
+    worker_dir.mkdir()
+    (worker_dir / ".dev.vars").write_text("RINK_SERVE_ADMIN_TOKEN=local-token\n")
+    worker_url = "https://manual.example.workers.dev"
+    synced = []
+
+    monkeypatch.setattr(
+        serve_mod,
+        "deploy_worker",
+        lambda path: serve_mod.DeployResult(output="Deployed rink-serve\n", worker_url=None),
+    )
+    monkeypatch.setattr(
+        serve_mod,
+        "put_worker_secret",
+        lambda path, token: synced.append((path, token)) or "Uploaded secret\n",
+    )
+
+    r = runner.invoke(
+        cli.app,
+        ["serve", "--deploy", "--worker-dir", str(worker_dir)],
+        input=f"{worker_url}\n",
+    )
+
+    assert r.exit_code == 0, r.output
+    raw = cfgmod.read_raw()
+    assert raw["serve_url"] == worker_url
+    assert raw["serve_token"] == "local-token"
+    assert synced == [(worker_dir, "local-token")]
+    assert "Serve Worker URL" in r.stdout
+
+
+def test_serve_deploy_accepts_worker_url_option(env, tmp_path, monkeypatch):
+    worker_dir = tmp_path / "worker"
+    worker_dir.mkdir()
+    worker_url = "https://manual.example.workers.dev"
+    synced = []
+
+    monkeypatch.setattr(
+        serve_mod,
+        "deploy_worker",
+        lambda path: serve_mod.DeployResult(output="Deployed rink-serve\n", worker_url=None),
+    )
+    monkeypatch.setattr(
+        serve_mod,
+        "put_worker_secret",
+        lambda path, token: synced.append((path, token)) or "Uploaded secret\n",
+    )
+
+    r = runner.invoke(
+        cli.app,
+        [
+            "serve",
+            "--deploy",
+            "--worker-dir",
+            str(worker_dir),
+            "--worker-url",
+            worker_url,
+            "--token",
+            "manual-token",
+        ],
+    )
+
+    assert r.exit_code == 0, r.output
+    raw = cfgmod.read_raw()
+    assert raw["serve_url"] == worker_url
+    assert raw["serve_token"] == "manual-token"
+    assert synced == [(worker_dir, "manual-token")]
+
+
+def test_serve_creates_receive_link(env, monkeypatch):
+    calls = []
+
+    def fake_create(worker_url, token, **kwargs):
+        calls.append((worker_url, token, kwargs))
+        return serve_mod.ReceiveLink(
+            id="drop1",
+            upload_url="https://serve.example/r/drop1",
+            expires_at=(int(time.time()) + 3600) * 1000,
+            max_uploads=1,
+            max_bytes=10 * 1024 * 1024,
+            max_download_views=1,
+            prefix=kwargs["prefix"],
+        )
+
+    monkeypatch.setenv("RINK_SERVE_URL", "https://serve.example")
+    monkeypatch.setenv("RINK_SERVE_TOKEN", "tok")
+    monkeypatch.setattr(serve_mod, "create_receive_link", fake_create)
+
+    r = runner.invoke(
+        cli.app,
+        ["serve", "--quiet", "--prefix", "dropbox", "--max-size", "10MB", "--expiry", "1h"],
+    )
+
+    assert r.exit_code == 0
+    assert r.stdout.strip() == "https://serve.example/r/drop1"
+    assert calls == [
+        (
+            "https://serve.example",
+            "tok",
+            {
+                "prefix": "dropbox",
+                "label": None,
+                "ttl_seconds": 3600,
+                "max_uploads": 1,
+                "max_bytes": 10 * 1024 * 1024,
+                "max_download_views": 1,
+            },
+        )
+    ]
+
+
+def test_serve_unauthorized_suggests_secret_sync(env, monkeypatch):
+    def fake_create(worker_url, token, **kwargs):
+        raise RuntimeError('Worker rejected request (401): {"error": "unauthorized"}')
+
+    monkeypatch.setenv("RINK_SERVE_URL", "https://serve.example")
+    monkeypatch.setenv("RINK_SERVE_TOKEN", "tok")
+    monkeypatch.setattr(serve_mod, "create_receive_link", fake_create)
+
+    r = runner.invoke(cli.app, ["serve", "--quiet"])
+
+    assert r.exit_code == 1
+    output = r.stdout + r.stderr
+    assert "does not match the deployed Worker secret" in output
+    assert "rink" in output
+    assert "serve --deploy --worker-dir rink-serve-worker" in output
+
+
+def test_serve_requires_worker_config(env, monkeypatch):
+    monkeypatch.delenv("RINK_SERVE_URL", raising=False)
+    monkeypatch.delenv("RINK_SERVE_TOKEN", raising=False)
+
+    r = runner.invoke(cli.app, ["serve", "--quiet"])
+
+    assert r.exit_code == 1
+    assert "Serve Worker URL" in (r.stdout + r.output)
